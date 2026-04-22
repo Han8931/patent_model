@@ -6,6 +6,7 @@ from collections import deque
 from pathlib import Path
 
 from docx import Document
+from docx.shared import Pt
 
 from .client import LLMClient, ClientConfig
 from .prompt import build_messages
@@ -25,10 +26,41 @@ SECTION_HEADER_MAP = {
 
 _BLANK_RE = re.compile(r'^\s*$')
 
+# Abbreviations whose trailing period must NOT trigger a sentence break
+_ABBREVS = {
+    "fig", "figs", "e.g", "i.e", "no", "nos", "u.s", "vol", "approx",
+    "cf", "vs", "et al", "sec", "art", "para", "ref", "dept",
+}
+
+
+def _break_sentences(text: str) -> str:
+    """Insert a newline at each sentence boundary, protecting known abbreviations."""
+    # Temporarily protect known abbreviations: replace their period with a placeholder
+    protected = re.sub(
+        r'\b(' + '|'.join(re.escape(a) for a in _ABBREVS) + r')\.',
+        lambda m: m.group(1) + '\x00',  # \x00 as placeholder
+        text,
+        flags=re.IGNORECASE,
+    )
+    # Break on ". " or ".  " followed by an uppercase letter
+    broken = re.sub(r'\.\s+(?=[A-Z])', '.\n', protected)
+    # Restore placeholders
+    return broken.replace('\x00', '.')
+
 
 def _break_after_semicolons(text: str) -> str:
-    """Insert a newline after each semicolon that is followed by a space."""
     return re.sub(r';\s+', ';\n', text)
+
+
+def postprocess(text: str) -> str:
+    text = _break_sentences(text)
+    text = _break_after_semicolons(text)
+    return text
+
+
+def _set_font(para, font_name: str) -> None:
+    for run in para.runs:
+        run.font.name = font_name
 
 
 class PatentTranslator:
@@ -53,13 +85,14 @@ class PatentTranslator:
 
         messages = build_messages(text, context=context)
         result = self.client.complete(messages).strip()
-        return _break_after_semicolons(result)
+        return postprocess(result)
 
     def translate_document(
         self,
         input_path: str | Path,
         output_path: str | Path,
         *,
+        font: str = "Times New Roman",
         delay: float = 0.5,
         verbose: bool = True,
     ) -> None:
@@ -84,6 +117,7 @@ class PatentTranslator:
                 translated = SECTION_HEADER_MAP[raw.strip()]
                 out_para = out_doc.add_paragraph(translated)
                 out_para.style = para.style
+                _set_font(out_para, font)
                 if verbose:
                     print(f"[{i:03d}] HEADER → {translated}")
                 continue
@@ -97,6 +131,7 @@ class PatentTranslator:
 
             out_para = out_doc.add_paragraph(translated)
             out_para.style = para.style
+            _set_font(out_para, font)
 
             if delay > 0:
                 time.sleep(delay)

@@ -49,6 +49,9 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help="Number of preceding paragraphs to pass as context (default: 3, 0 to disable)",
     )
+    parser.add_argument(
+        "--font", default="Times New Roman", help="Output font name (default: Times New Roman)"
+    )
     parser.add_argument("--quiet", action="store_true", help="Suppress progress output")
     return parser.parse_args()
 
@@ -84,6 +87,7 @@ def main() -> None:
     translator.translate_document(
         args.input,
         output,
+        font=args.font,
         delay=args.delay,
         verbose=not args.quiet,
     )
