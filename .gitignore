@@ -10,3 +10,6 @@ output/
 
 # Virtual environments
 .venv
+
+# Environment / secrets
+.env
