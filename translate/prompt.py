@@ -26,8 +26,23 @@ Korean:
 English translation:"""
 
 
-def build_messages(korean_text: str) -> list[dict]:
-    return [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": USER_TEMPLATE.format(text=korean_text)},
-    ]
+def build_messages(
+    korean_text: str,
+    context: list[tuple[str, str]] | None = None,
+) -> list[dict]:
+    """Build the message list for a translation request.
+
+    Args:
+        korean_text: The paragraph to translate.
+        context: Optional list of (korean, english) pairs from previous paragraphs,
+                 oldest first. Injected as prior turns so the model stays consistent
+                 on terminology throughout the document.
+    """
+    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    for kr, en in (context or []):
+        messages.append({"role": "user", "content": USER_TEMPLATE.format(text=kr)})
+        messages.append({"role": "assistant", "content": en})
+
+    messages.append({"role": "user", "content": USER_TEMPLATE.format(text=korean_text)})
+    return messages

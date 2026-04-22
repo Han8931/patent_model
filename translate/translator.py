@@ -2,15 +2,15 @@
 
 import re
 import time
+from collections import deque
 from pathlib import Path
 
 from docx import Document
-from docx.oxml.ns import qn
 
 from .client import LLMClient, ClientConfig
 from .prompt import build_messages
 
-# Section headers that should be translated but not sent to the LLM
+# Section headers translated by lookup, not LLM
 SECTION_HEADER_MAP = {
     "[발명의 설명]": "DESCRIPTION",
     "[발명의 명칭]": "TITLE OF INVENTION",
@@ -23,22 +23,37 @@ SECTION_HEADER_MAP = {
     "[과제의 해결 수단]": "SOLUTION TO PROBLEM",
 }
 
-# Paragraphs that are pure whitespace or empty
 _BLANK_RE = re.compile(r'^\s*$')
 
 
+def _break_after_semicolons(text: str) -> str:
+    """Insert a newline after each semicolon that is followed by a space."""
+    return re.sub(r';\s+', ';\n', text)
+
+
 class PatentTranslator:
-    def __init__(self, config: ClientConfig | None = None):
+    def __init__(self, config: ClientConfig | None = None, context_window: int = 3):
+        """
+        Args:
+            config: LLM client configuration.
+            context_window: Number of preceding (korean, english) paragraph pairs
+                            to include in each request for terminology consistency.
+                            Set to 0 to disable.
+        """
         self.config = config or ClientConfig()
         self.client = LLMClient(self.config)
+        self.context_window = context_window
 
-    def _translate_paragraph(self, text: str) -> str:
-        """Translate a single paragraph of Korean patent text."""
-        if SECTION_HEADER_MAP.get(text.strip()):
-            return SECTION_HEADER_MAP[text.strip()]
+    def _translate_paragraph(
+        self, text: str, context: list[tuple[str, str]]
+    ) -> str:
+        mapped = SECTION_HEADER_MAP.get(text.strip())
+        if mapped:
+            return mapped
 
-        messages = build_messages(text)
-        return self.client.complete(messages).strip()
+        messages = build_messages(text, context=context)
+        result = self.client.complete(messages).strip()
+        return _break_after_semicolons(result)
 
     def translate_document(
         self,
@@ -48,17 +63,15 @@ class PatentTranslator:
         delay: float = 0.5,
         verbose: bool = True,
     ) -> None:
-        """
-        Read a cleaned Korean patent docx, translate each paragraph,
-        and write an English docx preserving the document structure.
-        """
         input_path = Path(input_path)
         output_path = Path(output_path)
 
         doc = Document(input_path)
         out_doc = Document()
 
-        # Copy core document styles from source so formatting is retained
+        # Rolling buffer of (korean, english) pairs for context injection
+        history: deque[tuple[str, str]] = deque(maxlen=self.context_window)
+
         for i, para in enumerate(doc.paragraphs):
             raw = para.text
 
@@ -66,21 +79,21 @@ class PatentTranslator:
                 out_doc.add_paragraph()
                 continue
 
-            # Check for static header mapping first
-            mapped = SECTION_HEADER_MAP.get(raw.strip())
-            if mapped:
-                out_para = out_doc.add_paragraph(mapped)
+            # Static header — add to output but don't pollute the context buffer
+            if SECTION_HEADER_MAP.get(raw.strip()):
+                translated = SECTION_HEADER_MAP[raw.strip()]
+                out_para = out_doc.add_paragraph(translated)
                 out_para.style = para.style
                 if verbose:
-                    print(f"[{i:03d}] HEADER → {mapped}")
+                    print(f"[{i:03d}] HEADER → {translated}")
                 continue
 
-            # Translate via LLM
             if verbose:
                 preview = raw[:60].replace('\n', ' ')
                 print(f"[{i:03d}] Translating: {preview}…")
 
-            translated = self._translate_paragraph(raw)
+            translated = self._translate_paragraph(raw, list(history))
+            history.append((raw, translated))
 
             out_para = out_doc.add_paragraph(translated)
             out_para.style = para.style
@@ -90,4 +103,4 @@ class PatentTranslator:
 
         out_doc.save(output_path)
         if verbose:
-            print(f"\nSaved translated document → {output_path}")
+            print(f"\nSaved → {output_path}")
