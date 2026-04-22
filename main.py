@@ -1,5 +1,86 @@
-def main():
-    print("Hello from patent-model!")
+"""Patent translation CLI entry point."""
+
+import argparse
+from pathlib import Path
+
+from translate.client import ClientConfig
+from translate.translator import PatentTranslator
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Translate a Korean patent application docx to English."
+    )
+    parser.add_argument("input", type=Path, help="Cleaned Korean patent .docx file")
+    parser.add_argument(
+        "output",
+        type=Path,
+        nargs="?",
+        help="Output path: a .docx file or a directory (default: output/)",
+    )
+    parser.add_argument(
+        "--model", default="gpt-oss:120b", help="Model name (default: gpt-oss:120b)"
+    )
+    parser.add_argument(
+        "--base-url",
+        default="http://localhost:11434/v1",
+        help="OpenAI-compatible API base URL (default: Ollama localhost)",
+    )
+    parser.add_argument(
+        "--api-key",
+        default="ollama",
+        help="API key (use 'ollama' for local Ollama; provide real key for OpenAI etc.)",
+    )
+    parser.add_argument(
+        "--temperature", type=float, default=0.2, help="Sampling temperature (default: 0.2)"
+    )
+    parser.add_argument(
+        "--max-tokens", type=int, default=4096, help="Max tokens per response (default: 4096)"
+    )
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.5,
+        help="Seconds to wait between API calls (default: 0.5)",
+    )
+    parser.add_argument("--quiet", action="store_true", help="Suppress progress output")
+    return parser.parse_args()
+
+
+def resolve_output(input_path: Path, output_arg: Path | None) -> Path:
+    """Resolve the output file path.
+
+    - No argument → output/<input_stem>_en.docx
+    - Directory    → <dir>/<input_stem>_en.docx
+    - File path    → used as-is
+    """
+    if output_arg is None or output_arg.is_dir() or not output_arg.suffix:
+        directory = output_arg if output_arg is not None else Path("output")
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory / f"{input_path.stem}_en.docx"
+    return output_arg
+
+
+def main() -> None:
+    args = parse_args()
+
+    config = ClientConfig(
+        model=args.model,
+        base_url=args.base_url,
+        api_key=args.api_key,
+        temperature=args.temperature,
+        max_tokens=args.max_tokens,
+    )
+
+    output = resolve_output(args.input, args.output)
+
+    translator = PatentTranslator(config)
+    translator.translate_document(
+        args.input,
+        output,
+        delay=args.delay,
+        verbose=not args.quiet,
+    )
 
 
 if __name__ == "__main__":
