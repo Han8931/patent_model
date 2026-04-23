@@ -31,6 +31,8 @@ SECTION_HEADER_MAP = {
     "[발명의 효과]":                    "ADVANTAGEOUS EFFECTS OF INVENTION",
     "[기술적 과제]":                    "TECHNICAL PROBLEM",
     "[과제의 해결 수단]":               "SOLUTION TO PROBLEM",
+    "[대표도]":                         "REPRESENTATIVE FIGURE",
+    "대표도":                           "REPRESENTATIVE FIGURE",
 }
 
 # Korean claim header: 【청구항 N】 or [청구항 N] (with optional spaces)
@@ -265,10 +267,10 @@ class PatentTranslator:
             claim_match = _CLAIM_HEADER_RE.match(raw.strip())
             if claim_match and current_section == "CLAIMS":
                 pending_claim_num = int(claim_match.group(1))
-                # Blank out the Korean marker — number will be prepended to claim body
-                _replace_text(para, '', font)
+                # Replace Korean marker with just the claim number
+                _replace_text(para, f'{pending_claim_num}.', font)
                 if verbose:
-                    print(f"[{i:03d}] CLAIM HEADER → pending #{pending_claim_num}")
+                    print(f"[{i:03d}] CLAIM HEADER → {pending_claim_num}.")
                 continue
 
             # --- Regular paragraph: translate ---
@@ -278,9 +280,9 @@ class PatentTranslator:
 
             translated = self._translate_text(raw, list(history), current_prompt)
 
-            # Normalize claim body: strip any LLM prefix, prepend canonical N.
+            # Strip any LLM-added claim number prefix from the body text
             if current_section == "CLAIMS" and pending_claim_num is not None:
-                translated = _normalize_claim(translated, pending_claim_num)
+                translated = _LLM_CLAIM_PREFIX_RE.sub('', translated.strip())
                 pending_claim_num = None
 
             history.append((raw, translated))
