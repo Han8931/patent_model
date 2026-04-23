@@ -1,8 +1,10 @@
 """OpenAI-compatible LLM client with configurable base URL for Ollama or any OpenAI-API provider."""
 
+import os
 from dataclasses import dataclass, field
 from typing import Iterator
 
+from dotenv import load_dotenv
 from openai import OpenAI
 
 
@@ -14,6 +16,18 @@ class ClientConfig:
     temperature: float = 0.2
     max_tokens: int = 4096
     extra_params: dict = field(default_factory=dict)
+
+    @classmethod
+    def from_env(cls) -> "ClientConfig":
+        """Load LLM connection settings from environment / .env file."""
+        load_dotenv()
+        return cls(
+            model       = os.getenv("LLM_MODEL",       cls.model),
+            base_url    = os.getenv("LLM_BASE_URL",    cls.base_url),
+            api_key     = os.getenv("LLM_API_KEY",     cls.api_key),
+            temperature = float(os.getenv("LLM_TEMPERATURE", cls.temperature)),
+            max_tokens  = int(os.getenv("LLM_MAX_TOKENS",    cls.max_tokens)),
+        )
 
 
 class LLMClient:

@@ -11,12 +11,15 @@ from dotenv import load_dotenv
 
 def _client():
     load_dotenv()
-    return boto3.client(
-        "s3",
-        region_name=os.environ["AWS_REGION"],
-        aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
-        aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+    kwargs = dict(
+        region_name          = os.environ["AWS_REGION"],
+        aws_access_key_id    = os.environ["AWS_ACCESS_KEY_ID"],
+        aws_secret_access_key= os.environ["AWS_SECRET_ACCESS_KEY"],
     )
+    endpoint_url = os.getenv("S3_ENDPOINT_URL")
+    if endpoint_url:
+        kwargs["endpoint_url"] = endpoint_url
+    return boto3.client("s3", **kwargs)
 
 
 def list_docx_keys(bucket: str, prefix: str = "") -> list[str]:

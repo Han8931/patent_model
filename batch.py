@@ -18,24 +18,18 @@ from translate.translator import PatentTranslator
 # ---------------------------------------------------------------------------
 
 # Set to True to pull files from S3 (reads .env for credentials + bucket).
-# Set to False to use the LOCAL_FILES list below.
+# Set to False to scan LOCAL_DIRS for .docx files.
 USE_S3 = True
 
-# Used when USE_S3 = False
-LOCAL_FILES: list[str] = [
-    "data/published1_kr_clean.docx",
-    # "data/published2_kr_clean.docx",
+# Directories to scan when USE_S3 = False (searched recursively)
+LOCAL_DIRS: list[str] = [
+    "data",
+    # "data/batch2",
 ]
 
 OUTPUT_DIR = Path("output")
 
-CONFIG = ClientConfig(
-    model="gpt-oss:120b",
-    base_url="http://localhost:11434/v1",
-    api_key="ollama",
-    temperature=0.2,
-    max_tokens=4096,
-)
+CONFIG = ClientConfig.from_env()   # reads LLM_* variables from .env
 
 WORKERS = 2          # parallel files; keep ≤ Ollama concurrency limit
 CONTEXT_WINDOW = 3
@@ -77,12 +71,20 @@ def _translate_file(job: dict) -> dict:
 # Main
 # ---------------------------------------------------------------------------
 
+def _scan_dirs(dirs: list[str]) -> list[Path]:
+    """Collect all .docx files found recursively under the given directories."""
+    files: list[Path] = []
+    for d in dirs:
+        files.extend(sorted(Path(d).rglob("*.docx")))
+    return files
+
+
 def _resolve_files() -> list[Path]:
     """Return the list of local input paths, downloading from S3 if needed."""
     if USE_S3:
         from translate.s3 import fetch_inputs
-        return fetch_inputs()          # reads bucket / prefix / download_dir from .env
-    return [Path(f) for f in LOCAL_FILES]
+        return fetch_inputs()
+    return _scan_dirs(LOCAL_DIRS)
 
 
 def main() -> None:

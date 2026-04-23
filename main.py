@@ -8,6 +8,13 @@ from translate.translator import PatentTranslator
 
 
 def parse_args() -> argparse.Namespace:
+    # Load .env so defaults below reflect the current environment config
+    from dotenv import load_dotenv
+    import os
+    load_dotenv()
+
+    env = ClientConfig.from_env()  # used only to derive defaults for help text
+
     parser = argparse.ArgumentParser(
         description="Translate a Korean patent application docx to English."
     )
@@ -19,23 +26,24 @@ def parse_args() -> argparse.Namespace:
         help="Output path: a .docx file or a directory (default: output/)",
     )
     parser.add_argument(
-        "--model", default="gpt-oss:120b", help="Model name (default: gpt-oss:120b)"
+        "--model", default=env.model,
+        help=f"Model name (default: {env.model})",
     )
     parser.add_argument(
-        "--base-url",
-        default="http://localhost:11434/v1",
-        help="OpenAI-compatible API base URL (default: Ollama localhost)",
+        "--base-url", default=env.base_url,
+        help=f"OpenAI-compatible API base URL (default: {env.base_url})",
     )
     parser.add_argument(
-        "--api-key",
-        default="ollama",
-        help="API key (use 'ollama' for local Ollama; provide real key for OpenAI etc.)",
+        "--api-key", default=env.api_key,
+        help="API key (overrides LLM_API_KEY in .env)",
     )
     parser.add_argument(
-        "--temperature", type=float, default=0.2, help="Sampling temperature (default: 0.2)"
+        "--temperature", type=float, default=env.temperature,
+        help=f"Sampling temperature (default: {env.temperature})",
     )
     parser.add_argument(
-        "--max-tokens", type=int, default=4096, help="Max tokens per response (default: 4096)"
+        "--max-tokens", type=int, default=env.max_tokens,
+        help=f"Max tokens per response (default: {env.max_tokens})",
     )
     parser.add_argument(
         "--delay",
