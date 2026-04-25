@@ -187,18 +187,25 @@ def _insert_para_after(ref_para, text: str, font_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 class PatentTranslator:
-    def __init__(self, config: ClientConfig | None = None, context_window: int = 3):
+    def __init__(
+        self,
+        config: ClientConfig | None = None,
+        context_window: int = 3,
+        lookahead_window: int = 2,
+    ):
         self.config = config or ClientConfig()
         self.client = LLMClient(self.config)
         self.context_window = context_window
+        self.lookahead_window = lookahead_window
 
     def _translate_text(
         self,
         text: str,
         context: list[tuple[str, str]],
         prompt: Prompt,
+        lookahead: list[str] | None = None,
     ) -> str:
-        messages = prompt.build_messages(text, context=context)
+        messages = prompt.build_messages(text, context=context, lookahead=lookahead)
         result = self.client.complete(messages).strip()
         return postprocess(result)
 
@@ -217,6 +224,8 @@ class PatentTranslator:
         shutil.copy2(input_path, output_path)
         doc = Document(output_path)
 
+        paragraphs = list(doc.paragraphs)   # pre-collected for lookahead
+
         history: deque[tuple[str, str]] = deque(maxlen=self.context_window)
 
         current_section: str | None = None
@@ -232,7 +241,19 @@ class PatentTranslator:
                 if verbose:
                     print(f"      ABSTRACT word count → ({count})")
 
-        for i, para in enumerate(doc.paragraphs):
+        def _get_lookahead(idx: int) -> list[str]:
+            result: list[str] = []
+            for j in range(idx + 1, len(paragraphs)):
+                if len(result) >= self.lookahead_window:
+                    break
+                p = paragraphs[j]
+                t = p.text
+                if _BLANK_RE.match(t) or _has_non_text_content(p):
+                    continue
+                result.append(t)
+            return result
+
+        for i, para in enumerate(paragraphs):
             raw = para.text
 
             if _BLANK_RE.match(raw):
@@ -278,7 +299,8 @@ class PatentTranslator:
                 preview = raw[:60].replace('\n', ' ')
                 print(f"[{i:03d}] Translating: {preview}…")
 
-            translated = self._translate_text(raw, list(history), current_prompt)
+            lookahead = _get_lookahead(i) if self.lookahead_window > 0 else None
+            translated = self._translate_text(raw, list(history), current_prompt, lookahead=lookahead)
 
             # Strip any LLM-added claim number prefix from the body text
             if current_section == "CLAIMS" and pending_claim_num is not None:

@@ -33,6 +33,7 @@ CONFIG = ClientConfig.from_env()   # reads LLM_* variables from .env
 
 WORKERS = 2          # parallel files; keep ≤ Ollama concurrency limit
 CONTEXT_WINDOW = 3
+LOOKAHEAD_WINDOW = 2
 FONT = "Times New Roman"
 DELAY = 0.5          # seconds between API calls within one file
 
@@ -49,7 +50,7 @@ def _translate_file(job: dict) -> dict:
 
     try:
         config = ClientConfig(**job["config"])
-        translator = PatentTranslator(config, context_window=job["context_window"])
+        translator = PatentTranslator(config, context_window=job["context_window"], lookahead_window=job["lookahead_window"])
 
         print(f"[{name}] Starting…")
         translator.translate_document(
@@ -99,10 +100,11 @@ def main() -> None:
         {
             "input":          str(inp),
             "output":         str(OUTPUT_DIR / f"{inp.stem}_en.docx"),
-            "config":         asdict(CONFIG),
-            "context_window": CONTEXT_WINDOW,
-            "font":           FONT,
-            "delay":          DELAY,
+            "config":          asdict(CONFIG),
+            "context_window":  CONTEXT_WINDOW,
+            "lookahead_window": LOOKAHEAD_WINDOW,
+            "font":            FONT,
+            "delay":           DELAY,
         }
         for inp in input_files
     ]

@@ -85,17 +85,34 @@ class Prompt:
         self,
         korean_text: str,
         context: list[tuple[str, str]] | None = None,
+        lookahead: list[str] | None = None,
     ) -> list[dict]:
         """Build the chat message list for one translation call.
 
         Rolling context pairs (korean, english) are injected as prior
         user/assistant turns so the model stays consistent on terminology.
+        Lookahead strings are appended to the current user message as
+        read-only upcoming context.
         """
         messages: list[dict] = [{"role": "system", "content": self.system}]
         for kr, en in (context or []):
             messages.append({"role": "user", "content": self.user.format(text=kr)})
             messages.append({"role": "assistant", "content": en})
-        messages.append({"role": "user", "content": self.user.format(text=korean_text)})
+
+        user_content = self.user.format(text=korean_text)
+        if lookahead:
+            upcoming = "\n".join(lookahead)
+            lookahead_block = (
+                f"\n[Upcoming paragraphs — for context only, do NOT translate:]\n{upcoming}"
+            )
+            marker = "\n\nEnglish translation:"
+            if marker in user_content:
+                idx = user_content.rfind(marker)
+                user_content = user_content[:idx] + lookahead_block + user_content[idx:]
+            else:
+                user_content += lookahead_block
+
+        messages.append({"role": "user", "content": user_content})
         return messages
 
 
