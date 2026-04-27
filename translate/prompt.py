@@ -186,3 +186,65 @@ SECTION_PROMPTS: Dict[str, Prompt] = {
 }
 
 DEFAULT_PROMPT = PROMPT_BODY
+
+
+# ---------------------------------------------------------------------------
+# Review phase — decision node + revision
+# ---------------------------------------------------------------------------
+
+_REVIEW_SYSTEM = (
+    "You are a senior patent translation reviewer (Korean → English).\n"
+    "Assess translated patent paragraphs for the following issues:\n"
+    "1. Terminology consistency — the same Korean term must map to the same English term throughout.\n"
+    "2. Translation accuracy — no omissions, additions, or hallucinations relative to the Korean.\n"
+    "3. Claim structure — independent claims must start with 'A <category> comprising:';\n"
+    "   dependent claims must start with 'The <category> of claim N, wherein'.\n"
+    "4. Figure references — must be 'FIG. N' (uppercase, period after FIG), never 'Figure N' or 'fig N'.\n"
+    "5. Patent style — formal USPTO language; no contractions or casual phrasing.\n"
+    "Respond with valid JSON only. No commentary, no markdown fences outside the JSON.\n"
+)
+
+
+def build_decision_messages(section: str, pairs: list[tuple[str, str]]) -> list[dict]:
+    """Build the decision-node prompt: should this section be revised?"""
+    paragraphs_block = "\n\n".join(
+        f"[{i}]\nKorean: {kr}\nEnglish: {en}"
+        for i, (kr, en) in enumerate(pairs)
+    )
+    user_content = (
+        f"Section: {section}\n\n"
+        f"{paragraphs_block}\n\n"
+        f"Identify any quality issues in the translations above.\n"
+        f"Respond with JSON only — one of:\n"
+        f'  {{"needs_revision": false, "issues": []}}\n'
+        f'  {{"needs_revision": true, "issues": ["<concise description of each issue>"]}}'
+    )
+    return [
+        {"role": "system", "content": _REVIEW_SYSTEM},
+        {"role": "user", "content": user_content},
+    ]
+
+
+def build_revision_messages(
+    section: str,
+    pairs: list[tuple[str, str]],
+    issues: list[str],
+) -> list[dict]:
+    """Build the revision prompt: fix the identified issues."""
+    paragraphs_block = "\n\n".join(
+        f"[{i}]\nKorean: {kr}\nEnglish: {en}"
+        for i, (kr, en) in enumerate(pairs)
+    )
+    issues_block = "\n".join(f"- {issue}" for issue in issues)
+    user_content = (
+        f"Section: {section}\n\n"
+        f"Issues to fix:\n{issues_block}\n\n"
+        f"{paragraphs_block}\n\n"
+        f"Return ONLY paragraphs that need changes as a JSON array.\n"
+        f"Omit paragraphs that are already correct.\n"
+        f'Format: [{{"index": 0, "text": "revised English text"}}, ...]'
+    )
+    return [
+        {"role": "system", "content": _REVIEW_SYSTEM},
+        {"role": "user", "content": user_content},
+    ]

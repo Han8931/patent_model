@@ -1,5 +1,6 @@
 """Paragraph-level Korean→English patent translator using an OpenAI-compatible API."""
 
+import json
 import re
 import shutil
 import time
@@ -11,7 +12,22 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 from .client import LLMClient, ClientConfig
-from .prompt import Prompt, SECTION_PROMPTS, DEFAULT_PROMPT
+from .prompt import Prompt, SECTION_PROMPTS, DEFAULT_PROMPT, build_decision_messages, build_revision_messages
+
+def _extract_json(text: str):
+    """Parse JSON from LLM output that may contain surrounding prose."""
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r'(\{.*\}|\[.*\])', text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except json.JSONDecodeError:
+                pass
+    return None
+
 
 # XML namespaces
 _W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
@@ -209,6 +225,81 @@ class PatentTranslator:
         result = self.client.complete(messages).strip()
         return postprocess(result)
 
+    def _decide_revision(
+        self,
+        section: str,
+        pairs: list[tuple[str, str]],
+        verbose: bool,
+    ) -> dict:
+        try:
+            messages = build_decision_messages(section, pairs)
+            raw = self.client.complete(messages)
+            result = _extract_json(raw)
+            if isinstance(result, dict):
+                return result
+        except Exception as exc:
+            if verbose:
+                print(f"  [REVIEW] Decision call failed: {exc}")
+        return {"needs_revision": False, "issues": []}
+
+    def _revise_section(
+        self,
+        section: str,
+        pairs: list[tuple[str, str]],
+        issues: list[str],
+        verbose: bool,
+    ) -> list[dict]:
+        try:
+            messages = build_revision_messages(section, pairs, issues)
+            raw = self.client.complete(messages)
+            result = _extract_json(raw)
+            if isinstance(result, list):
+                return result
+        except Exception as exc:
+            if verbose:
+                print(f"  [REVIEW] Revision call failed: {exc}")
+        return []
+
+    def _review_section(
+        self,
+        section_name: str,
+        buffer: list[tuple],   # (para, korean, translated)
+        font: str,
+        verbose: bool,
+    ) -> None:
+        if len(buffer) < 2:
+            return
+
+        pairs = [(kr, en) for _, kr, en in buffer]
+
+        if verbose:
+            print(f"\n  [REVIEW] Checking {section_name} ({len(pairs)} paragraphs)…")
+
+        decision = self._decide_revision(section_name, pairs, verbose)
+        if not decision.get("needs_revision", False):
+            if verbose:
+                print(f"  [REVIEW] {section_name} — no revision needed.")
+            return
+
+        issues = decision.get("issues", [])
+        if verbose:
+            for issue in issues:
+                print(f"  [REVIEW] Issue: {issue}")
+
+        revisions = self._revise_section(section_name, pairs, issues, verbose)
+
+        applied = 0
+        for item in revisions:
+            idx = item.get("index")
+            text = item.get("text")
+            if idx is not None and isinstance(text, str) and 0 <= idx < len(buffer):
+                para, _, _ = buffer[idx]
+                _replace_text(para, postprocess(text), font)
+                applied += 1
+
+        if verbose:
+            print(f"  [REVIEW] Applied {applied} revision(s).")
+
     def translate_document(
         self,
         input_path: str | Path,
@@ -217,6 +308,7 @@ class PatentTranslator:
         font: str = "Times New Roman",
         delay: float = 0.5,
         verbose: bool = True,
+        review: bool = True,
     ) -> None:
         input_path = Path(input_path)
         output_path = Path(output_path)
@@ -233,6 +325,7 @@ class PatentTranslator:
         pending_claim_num: int | None = None   # set when 【청구항 N】 header is seen
         abstract_last_para = None
         abstract_texts: list[str] = []
+        section_buffer: list[tuple] = []       # (para, korean, translated) per section
 
         def _flush_abstract_word_count() -> None:
             if abstract_last_para is not None and abstract_texts:
@@ -240,6 +333,11 @@ class PatentTranslator:
                 _insert_para_after(abstract_last_para, f'({count})', font)
                 if verbose:
                     print(f"      ABSTRACT word count → ({count})")
+
+        def _flush_review() -> None:
+            if review and current_section:
+                self._review_section(current_section, section_buffer, font, verbose)
+            section_buffer.clear()
 
         def _get_lookahead(idx: int) -> list[str]:
             result: list[str] = []
@@ -269,13 +367,14 @@ class PatentTranslator:
             # --- Section header ---
             mapped = SECTION_HEADER_MAP.get(raw.strip())
             if mapped:
-                # Leaving ABSTRACT: flush word count before switching section
+                # Leaving ABSTRACT: flush word count before review/section switch
                 if current_section == "ABSTRACT" and mapped != "ABSTRACT":
                     _flush_abstract_word_count()
                     abstract_last_para = None
                     abstract_texts = []
-                # Entering a new real section (ignore duplicate ABSTRACT sub-headers)
+                # Review completed section before switching
                 if mapped != current_section:
+                    _flush_review()
                     current_section = mapped
                     current_prompt = SECTION_PROMPTS.get(mapped, DEFAULT_PROMPT)
                     pending_claim_num = None
@@ -309,6 +408,7 @@ class PatentTranslator:
 
             history.append((raw, translated))
             _replace_text(para, translated, font)
+            section_buffer.append((para, raw, translated))
 
             if current_section == "ABSTRACT":
                 abstract_last_para = para
@@ -317,6 +417,7 @@ class PatentTranslator:
             if delay > 0:
                 time.sleep(delay)
 
+        _flush_review()
         _flush_abstract_word_count()
 
         doc.save(output_path)
