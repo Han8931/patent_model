@@ -62,6 +62,7 @@ def fetch_inputs(
     bucket: str | None = None,
     prefix: str | None = None,
     download_dir: str | Path | None = None,
+    endpoint_url: str | None = None,
 ) -> list[Path]:
     """
     Convenience function: load config from .env, list all .docx files
@@ -73,6 +74,8 @@ def fetch_inputs(
     bucket       = bucket       or os.environ["S3_BUCKET"]
     prefix       = prefix       if prefix is not None else os.getenv("S3_PREFIX", "")
     download_dir = download_dir or os.getenv("S3_DOWNLOAD_DIR", "data/s3")
+    if endpoint_url:
+        os.environ["S3_ENDPOINT_URL"] = endpoint_url
 
     keys = list_docx_keys(bucket, prefix)
     if not keys:

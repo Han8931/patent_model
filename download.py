@@ -29,6 +29,11 @@ def parse_args() -> argparse.Namespace:
         default=os.getenv("S3_DOWNLOAD_DIR", "data/s3"),
         help="Local directory to download into (default: S3_DOWNLOAD_DIR from .env)",
     )
+    parser.add_argument(
+        "--endpoint-url",
+        default=os.getenv("S3_ENDPOINT_URL"),
+        help="S3-compatible endpoint URL for MinIO, R2, etc. (default: S3_ENDPOINT_URL from .env)",
+    )
     return parser.parse_args()
 
 
@@ -39,7 +44,12 @@ def main() -> None:
         raise SystemExit("Error: S3 bucket not specified. Set S3_BUCKET in .env or pass --bucket.")
 
     print(f"Downloading from s3://{args.bucket}/{args.prefix} → {args.dir}")
-    paths = fetch_inputs(bucket=args.bucket, prefix=args.prefix, download_dir=args.dir)
+    paths = fetch_inputs(
+        bucket=args.bucket,
+        prefix=args.prefix,
+        download_dir=args.dir,
+        endpoint_url=args.endpoint_url,
+    )
 
     print(f"\nDownloaded {len(paths)} file(s) to {Path(args.dir).resolve()}")
 

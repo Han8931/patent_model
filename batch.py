@@ -19,7 +19,7 @@ from translate.translator import PatentTranslator
 
 # Set to True to pull files from S3 (reads .env for credentials + bucket).
 # Set to False to scan LOCAL_DIRS for .docx files.
-USE_S3 = True
+USE_S3 = False
 
 # Directories to scan when USE_S3 = False (searched recursively)
 LOCAL_DIRS: list[str] = [
@@ -53,7 +53,10 @@ def _translate_file(job: dict) -> dict:
         config = ClientConfig(**job["config"])
         translator = PatentTranslator(config, context_window=job["context_window"], lookahead_window=job["lookahead_window"])
 
-        print(f"[{name}] Starting…")
+        def _progress(msg: str) -> None:
+            print(f"[{name}] {msg}", flush=True)
+
+        _progress("Starting…")
         translator.translate_document(
             input_path,
             output_path,
@@ -61,8 +64,9 @@ def _translate_file(job: dict) -> dict:
             delay=job["delay"],
             verbose=False,
             review=job["review"],
+            progress_callback=_progress,
         )
-        print(f"[{name}] Done → {output_path}")
+        _progress(f"Done → {output_path}")
         return {"input": str(input_path), "output": str(output_path), "ok": True}
 
     except Exception:

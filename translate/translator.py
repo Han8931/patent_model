@@ -6,6 +6,7 @@ import shutil
 import time
 from collections import deque
 from pathlib import Path
+from typing import Callable
 
 from docx import Document
 from docx.oxml import OxmlElement
@@ -309,6 +310,7 @@ class PatentTranslator:
         delay: float = 0.5,
         verbose: bool = True,
         review: bool = True,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> None:
         input_path = Path(input_path)
         output_path = Path(output_path)
@@ -326,6 +328,17 @@ class PatentTranslator:
         abstract_last_para = None
         abstract_texts: list[str] = []
         section_buffer: list[tuple] = []       # (para, korean, translated) per section
+        translated_count = 0
+        total = sum(
+            1 for p in paragraphs
+            if not _BLANK_RE.match(p.text) and not _has_non_text_content(p)
+            and SECTION_HEADER_MAP.get(p.text.strip()) is None
+            and not _CLAIM_HEADER_RE.match(p.text.strip())
+        )
+
+        def _progress(msg: str) -> None:
+            if progress_callback:
+                progress_callback(msg)
 
         def _flush_abstract_word_count() -> None:
             if abstract_last_para is not None and abstract_texts:
@@ -335,8 +348,10 @@ class PatentTranslator:
                     print(f"      ABSTRACT word count → ({count})")
 
         def _flush_review() -> None:
-            if review and current_section:
+            if review and current_section and len(section_buffer) >= 2:
+                _progress(f"Reviewing {current_section}…")
                 self._review_section(current_section, section_buffer, font, verbose)
+                _progress(f"Review done")
             section_buffer.clear()
 
         def _get_lookahead(idx: int) -> list[str]:
@@ -379,6 +394,7 @@ class PatentTranslator:
                     current_prompt = SECTION_PROMPTS.get(mapped, DEFAULT_PROMPT)
                     pending_claim_num = None
                 _replace_text(para, mapped, font)
+                _progress(f"→ {mapped}")
                 if verbose:
                     print(f"[{i:03d}] HEADER → {mapped}  [prompt: {current_prompt.name}]")
                 continue
@@ -409,6 +425,9 @@ class PatentTranslator:
             history.append((raw, translated))
             _replace_text(para, translated, font)
             section_buffer.append((para, raw, translated))
+            translated_count += 1
+            if translated_count % 10 == 0 or translated_count == total:
+                _progress(f"{translated_count}/{total} paragraphs")
 
             if current_section == "ABSTRACT":
                 abstract_last_para = para
