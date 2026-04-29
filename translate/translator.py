@@ -66,7 +66,11 @@ SECTION_HEADER_MAP = {
     "[도면의 간단한 설명]":              "BRIEF DESCRIPTION OF THE DRAWINGS",
     "[발명의 실시를 위한 구체적인 내용]": "DETAILED DESCRIPTION OF EMBODIMENTS",
     "[특허청구범위]":                   "CLAIMS",
-    "[청구범위]":                       "CLAIMS",       # alternate form used in this doc
+    "[청구범위]":                       "CLAIMS",
+    "【특허청구범위】":                  "CLAIMS",
+    "【청구범위】":                      "CLAIMS",
+    "특허청구범위":                      "CLAIMS",
+    "청구범위":                          "CLAIMS",
     "[요약서]":                         "ABSTRACT",
     "[발명의 효과]":                    "ADVANTAGEOUS EFFECTS OF INVENTION",
     "[기술적 과제]":                    "TECHNICAL PROBLEM",
@@ -446,7 +450,10 @@ class PatentTranslator:
                 continue
 
             m = _CLAIM_HEADER_RE.match(stripped)
-            if m and current_section == "CLAIMS":
+            if m:
+                # Auto-detect CLAIMS section even if the section header wasn't in the map
+                if current_section != "CLAIMS":
+                    current_section = "CLAIMS"
                 claim_num = int(m.group(1))
                 body = stripped[m.end():]
                 if not body:
