@@ -331,7 +331,8 @@ class PatentTranslator:
         translated_count = 0
         total = sum(
             1 for p in paragraphs
-            if not _BLANK_RE.match(p.text) and not _has_non_text_content(p)
+            if not _BLANK_RE.match(p.text)
+            and not (_has_non_text_content(p) and not _text_runs(p))  # skip pure non-text only
             and SECTION_HEADER_MAP.get(p.text.strip()) is None
             and not _CLAIM_HEADER_RE.match(p.text.strip())
         )
@@ -373,30 +374,40 @@ class PatentTranslator:
                 continue
 
             if _has_non_text_content(para):
-                for run in para.runs:
-                    run.font.name = font
+                if not _text_runs(para):
+                    # Pure image/equation paragraph — preserve as-is
+                    for run in para.runs:
+                        run.font.name = font
+                    if verbose:
+                        print(f"[{i:03d}] PRESERVED (image/equation)")
+                    continue
+                # Mixed paragraph: equations + text runs — translate text,
+                # equations are not in para.runs so _replace_text() leaves them untouched
                 if verbose:
-                    print(f"[{i:03d}] PRESERVED (image/equation)")
-                continue
+                    print(f"[{i:03d}] MIXED (equation+text) — translating text")
 
             # --- Section header ---
             mapped = SECTION_HEADER_MAP.get(raw.strip())
             if mapped:
-                # Leaving ABSTRACT: flush word count before review/section switch
-                if current_section == "ABSTRACT" and mapped != "ABSTRACT":
-                    _flush_abstract_word_count()
-                    abstract_last_para = None
-                    abstract_texts = []
-                # Review completed section before switching
                 if mapped != current_section:
+                    # Leaving ABSTRACT: flush word count before switching
+                    if current_section == "ABSTRACT":
+                        _flush_abstract_word_count()
+                        abstract_last_para = None
+                        abstract_texts = []
                     _flush_review()
                     current_section = mapped
                     current_prompt = SECTION_PROMPTS.get(mapped, DEFAULT_PROMPT)
                     pending_claim_num = None
-                _replace_text(para, mapped, font)
-                _progress(f"→ {mapped}")
-                if verbose:
-                    print(f"[{i:03d}] HEADER → {mapped}  [prompt: {current_prompt.name}]")
+                    _replace_text(para, mapped, font)
+                    _progress(f"→ {mapped}")
+                    if verbose:
+                        print(f"[{i:03d}] HEADER → {mapped}  [prompt: {current_prompt.name}]")
+                else:
+                    # Duplicate sub-header for the same section (e.g. [요약] after [요약서])
+                    _replace_text(para, '', font)
+                    if verbose:
+                        print(f"[{i:03d}] DUPLICATE HEADER '{raw.strip()}' — blanked")
                 continue
 
             # --- Claim number header: 【청구항 N】 ---
@@ -417,8 +428,8 @@ class PatentTranslator:
             lookahead = _get_lookahead(i) if self.lookahead_window > 0 else None
             translated = self._translate_text(raw, list(history), current_prompt, lookahead=lookahead)
 
-            # Strip any LLM-added claim number prefix from the body text
-            if current_section == "CLAIMS" and pending_claim_num is not None:
+            # Strip any LLM-added claim number prefix from every claims paragraph
+            if current_section == "CLAIMS":
                 translated = _LLM_CLAIM_PREFIX_RE.sub('', translated.strip())
                 pending_claim_num = None
 
