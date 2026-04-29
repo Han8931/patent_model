@@ -51,6 +51,14 @@ SECTION_HEADER_MAP = {
     "대표도":                           "REPRESENTATIVE FIGURE",
 }
 
+# Sub-headings that should be silently blanked when inside a specific section.
+# [요약] means "summary/abstract" and appears as a redundant sub-heading inside
+# the [요약서] abstract section — safe to blank there, but must NOT be in
+# SECTION_HEADER_MAP because it also appears in the description body.
+_SECTION_BLANK_HEADERS: dict[str, set[str]] = {
+    "ABSTRACT": {"[요약]"},
+}
+
 # Korean claim header: 【청구항 N】 or [청구항 N] (with optional spaces)
 _CLAIM_HEADER_RE = re.compile(r'^[【\[]\s*청구항\s*(\d+)\s*[】\]]\s*$')
 
@@ -384,6 +392,13 @@ class PatentTranslator:
                 # equations are not in para.runs so _replace_text() leaves them untouched
                 if verbose:
                     print(f"[{i:03d}] MIXED (equation+text) — translating text")
+
+            # --- Context-sensitive blank headers ---
+            if raw.strip() in _SECTION_BLANK_HEADERS.get(current_section, set()):
+                _replace_text(para, '', font)
+                if verbose:
+                    print(f"[{i:03d}] BLANKED sub-header '{raw.strip()}' in {current_section}")
+                continue
 
             # --- Section header ---
             mapped = SECTION_HEADER_MAP.get(raw.strip())
