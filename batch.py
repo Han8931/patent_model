@@ -32,8 +32,7 @@ OUTPUT_DIR = Path("output")
 CONFIG = ClientConfig.from_env()   # reads LLM_* variables from .env
 
 WORKERS = 2          # parallel files; keep ≤ Ollama concurrency limit
-CONTEXT_WINDOW = 3
-LOOKAHEAD_WINDOW = 2
+BATCH_SIZE = 10      # max paragraphs per section batch sent to the LLM
 REVIEW = True        # run post-translation review pass per section
 FONT = "Times New Roman"
 DELAY = 0.5          # seconds between API calls within one file
@@ -51,7 +50,7 @@ def _translate_file(job: dict) -> dict:
 
     try:
         config = ClientConfig(**job["config"])
-        translator = PatentTranslator(config, context_window=job["context_window"], lookahead_window=job["lookahead_window"])
+        translator = PatentTranslator(config, batch_size=job["batch_size"])
 
         def _progress(msg: str) -> None:
             print(f"[{name}] {msg}", flush=True)
@@ -106,10 +105,9 @@ def main() -> None:
         {
             "input":          str(inp),
             "output":         str(OUTPUT_DIR / f"{inp.stem}_en.docx"),
-            "config":           asdict(CONFIG),
-            "context_window":   CONTEXT_WINDOW,
-            "lookahead_window": LOOKAHEAD_WINDOW,
-            "review":           REVIEW,
+            "config":      asdict(CONFIG),
+            "batch_size":  BATCH_SIZE,
+            "review":      REVIEW,
             "font":             FONT,
             "delay":            DELAY,
         }

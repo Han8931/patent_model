@@ -52,16 +52,10 @@ def parse_args() -> argparse.Namespace:
         help="Seconds to wait between API calls (default: 0.5)",
     )
     parser.add_argument(
-        "--context-window",
+        "--batch-size",
         type=int,
-        default=3,
-        help="Number of preceding paragraphs to pass as context (default: 3, 0 to disable)",
-    )
-    parser.add_argument(
-        "--lookahead",
-        type=int,
-        default=2,
-        help="Number of upcoming paragraphs to include as read-only context (default: 2, 0 to disable)",
+        default=30,
+        help="Max paragraphs per section batch sent to the LLM (default: 30)",
     )
     parser.add_argument(
         "--font", default="Times New Roman", help="Output font name (default: Times New Roman)"
@@ -98,7 +92,7 @@ def main() -> None:
 
     output = resolve_output(args.input, args.output)
 
-    translator = PatentTranslator(config, context_window=args.context_window, lookahead_window=args.lookahead)
+    translator = PatentTranslator(config, batch_size=args.batch_size)
     translator.translate_document(
         args.input,
         output,

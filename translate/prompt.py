@@ -205,6 +205,21 @@ _REVIEW_SYSTEM = (
 )
 
 
+def build_batch_messages(section: str, prompt: "Prompt", items: list[str]) -> list[dict]:
+    """Build messages for batch translation of a list of paragraphs."""
+    numbered = "\n\n".join(f"[{i}] {text}" for i, text in enumerate(items))
+    user_content = (
+        "Translate each numbered Korean patent paragraph into English.\n"
+        "Return translations in the SAME numbered format [0], [1], [2]…\n"
+        "Output ONLY the numbered translations — no commentary, no explanations.\n\n"
+        f"{numbered}"
+    )
+    return [
+        {"role": "system", "content": prompt.system},
+        {"role": "user", "content": user_content},
+    ]
+
+
 def build_decision_messages(section: str, pairs: list[tuple[str, str]]) -> list[dict]:
     """Build the decision-node prompt: should this section be revised?"""
     paragraphs_block = "\n\n".join(

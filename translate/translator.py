@@ -13,7 +13,8 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 from .client import LLMClient, ClientConfig
-from .prompt import Prompt, SECTION_PROMPTS, DEFAULT_PROMPT, build_decision_messages, build_revision_messages
+from .prompt import (Prompt, SECTION_PROMPTS, DEFAULT_PROMPT,
+                      build_batch_messages, build_decision_messages, build_revision_messages)
 
 def _extract_json(text: str):
     """Parse JSON from LLM output that may contain surrounding prose."""
@@ -28,6 +29,29 @@ def _extract_json(text: str):
             except json.JSONDecodeError:
                 pass
     return None
+
+
+def _parse_batch_response(text: str, count: int) -> list[str | None]:
+    """Parse [N] numbered translation output back into an ordered list.
+
+    Splits on [N] markers; content between consecutive markers belongs to
+    the preceding index. Returns None for any index not found in the output.
+    """
+    results: list[str | None] = [None] * count
+    # re.split with a capturing group keeps the captured index in the list
+    parts = re.split(r'\n?\[(\d+)\]\s*', text.strip())
+    # parts = [pre-text, idx, content, idx, content, ...]
+    i = 1
+    while i + 1 < len(parts):
+        try:
+            idx = int(parts[i])
+            content = parts[i + 1].strip()
+            if 0 <= idx < count and content:
+                results[idx] = postprocess(content)
+        except (ValueError, IndexError):
+            pass
+        i += 2
+    return results
 
 
 # XML namespaces
@@ -260,24 +284,42 @@ class PatentTranslator:
     def __init__(
         self,
         config: ClientConfig | None = None,
-        context_window: int = 3,
-        lookahead_window: int = 2,
+        batch_size: int = 30,
     ):
         self.config = config or ClientConfig()
         self.client = LLMClient(self.config)
-        self.context_window = context_window
-        self.lookahead_window = lookahead_window
+        self.batch_size = batch_size
 
-    def _translate_text(
+    def _translate_batch(
         self,
-        text: str,
-        context: list[tuple[str, str]],
+        section: str,
+        items: list[str],
         prompt: Prompt,
-        lookahead: list[str] | None = None,
-    ) -> str:
-        messages = prompt.build_messages(text, context=context, lookahead=lookahead)
-        result = self.client.complete(messages).strip()
-        return postprocess(result)
+        verbose: bool = False,
+    ) -> list[str | None]:
+        """Translate a list of paragraphs in one LLM call. Returns None per item on failure."""
+        if not items:
+            return []
+        messages = build_batch_messages(section, prompt, items)
+        try:
+            raw = self.client.complete(messages)
+            results = _parse_batch_response(raw, len(items))
+            missing = sum(1 for r in results if r is None)
+            if missing and verbose:
+                print(f"  Warning: {missing}/{len(items)} paragraphs failed to parse — will fall back")
+            return results
+        except Exception as exc:
+            if verbose:
+                print(f"  Batch call failed: {exc}")
+            return [None] * len(items)
+
+    def _translate_single(self, text: str, prompt: Prompt) -> str:
+        """Fallback: translate one paragraph independently."""
+        messages = prompt.build_messages(text)
+        try:
+            return postprocess(self.client.complete(messages).strip())
+        except Exception:
+            return text
 
     def _decide_revision(
         self,
@@ -365,6 +407,7 @@ class PatentTranslator:
         review: bool = True,
         progress_callback: Callable[[str], None] | None = None,
     ) -> None:
+        start_time = time.time()
         input_path = Path(input_path)
         output_path = Path(output_path)
 
@@ -372,139 +415,163 @@ class PatentTranslator:
         doc = Document(output_path)
         _normalize_document(doc, font)
 
-        paragraphs = list(doc.paragraphs)   # pre-collected for lookahead
-
-        history: deque[tuple[str, str]] = deque(maxlen=self.context_window)
-
-        current_section: str | None = None
-        current_prompt: Prompt = DEFAULT_PROMPT
-        pending_claim_num: int | None = None   # set when 【청구항 N】 header is seen
-        abstract_last_para = None
-        abstract_texts: list[str] = []
-        section_buffer: list[tuple] = []       # (para, korean, translated) per section
-        translated_count = 0
-        total = sum(
-            1 for p in paragraphs
-            if not _BLANK_RE.match(p.text)
-            and not (_has_non_text_content(p) and not _text_runs(p))  # skip pure non-text only
-            and SECTION_HEADER_MAP.get(p.text.strip()) is None
-            and not _CLAIM_HEADER_RE.match(p.text.strip())
-        )
-
         def _progress(msg: str) -> None:
             if progress_callback:
                 progress_callback(msg)
 
-        def _flush_abstract_word_count() -> None:
-            if abstract_last_para is not None and abstract_texts:
-                count = _word_count(' '.join(abstract_texts))
-                _insert_para_after(abstract_last_para, f'({count})', font)
-                if verbose:
-                    print(f"      ABSTRACT word count → ({count})")
+        # ------------------------------------------------------------------
+        # Pass 1: classify every paragraph
+        # ------------------------------------------------------------------
+        records: list[dict] = []
+        current_section: str | None = None
 
-        def _flush_review() -> None:
-            if review and current_section and len(section_buffer) >= 2:
-                _progress(f"Reviewing {current_section}…")
-                self._review_section(current_section, section_buffer, font, verbose)
-                _progress(f"Review done")
-            section_buffer.clear()
-
-        def _get_lookahead(idx: int) -> list[str]:
-            result: list[str] = []
-            for j in range(idx + 1, len(paragraphs)):
-                if len(result) >= self.lookahead_window:
-                    break
-                p = paragraphs[j]
-                t = p.text
-                if _BLANK_RE.match(t) or _has_non_text_content(p):
-                    continue
-                result.append(t)
-            return result
-
-        for i, para in enumerate(paragraphs):
+        for para in doc.paragraphs:
             raw = para.text
+            stripped = raw.strip()
 
             if _BLANK_RE.match(raw):
+                records.append({"kind": "blank", "para": para, "section": current_section})
                 continue
 
-            if _has_non_text_content(para):
-                if not _text_runs(para):
-                    # Pure image/equation paragraph — preserve as-is
-                    for run in para.runs:
-                        run.font.name = font
-                    if verbose:
-                        print(f"[{i:03d}] PRESERVED (image/equation)")
-                    continue
-                # Mixed paragraph: equations + text runs — translate text,
-                # equations are not in para.runs so _replace_text() leaves them untouched
-                if verbose:
-                    print(f"[{i:03d}] MIXED (equation+text) — translating text")
+            if _has_non_text_content(para) and not _text_runs(para):
+                records.append({"kind": "image", "para": para, "section": current_section})
+                continue
 
-
-            # --- Section header ---
-            mapped = SECTION_HEADER_MAP.get(raw.strip())
+            mapped = SECTION_HEADER_MAP.get(stripped)
             if mapped:
                 if mapped != current_section:
-                    # Leaving ABSTRACT: flush word count before switching
-                    if current_section == "ABSTRACT":
-                        _flush_abstract_word_count()
-                        abstract_last_para = None
-                        abstract_texts = []
-                    _flush_review()
                     current_section = mapped
-                    current_prompt = SECTION_PROMPTS.get(mapped, DEFAULT_PROMPT)
-                    pending_claim_num = None
-                    _replace_text(para, mapped, font)
-                    _progress(f"→ {mapped}")
-                    if verbose:
-                        print(f"[{i:03d}] HEADER → {mapped}  [prompt: {current_prompt.name}]")
-                else:
-                    # Duplicate sub-header for the same section (e.g. [요약] after [요약서])
-                    _replace_text(para, '', font)
-                    if verbose:
-                        print(f"[{i:03d}] DUPLICATE HEADER '{raw.strip()}' — blanked")
+                records.append({"kind": "section_header", "para": para, "raw": raw,
+                                 "section": current_section, "mapped": mapped})
                 continue
 
-            # --- Claim number header: 【청구항 N】 ---
-            claim_match = _CLAIM_HEADER_RE.match(raw.strip())
-            if claim_match and current_section == "CLAIMS":
-                pending_claim_num = int(claim_match.group(1))
-                # Replace Korean marker with just the claim number
-                _replace_text(para, f'{pending_claim_num}.', font)
+            m = _CLAIM_HEADER_RE.match(stripped)
+            if m and current_section == "CLAIMS":
+                records.append({"kind": "claim_header", "para": para, "raw": raw,
+                                 "section": current_section, "claim_num": int(m.group(1))})
+                continue
+
+            records.append({"kind": "text", "para": para, "raw": raw,
+                             "section": current_section,
+                             "mixed": _has_non_text_content(para)})
+
+        # ------------------------------------------------------------------
+        # Pass 2: apply non-translation transformations immediately
+        # ------------------------------------------------------------------
+        for r in records:
+            if r["kind"] == "section_header":
+                _replace_text(r["para"], r["mapped"], font)
+                _progress(f"→ {r['mapped']}")
                 if verbose:
-                    print(f"[{i:03d}] CLAIM HEADER → {pending_claim_num}.")
-                continue
+                    print(f"HEADER → {r['mapped']}")
+            elif r["kind"] == "claim_header":
+                _replace_text(r["para"], f"{r['claim_num']}.", font)
+            elif r["kind"] == "image":
+                for run in r["para"].runs:
+                    run.font.name = font
+                if verbose:
+                    print("PRESERVED (image/equation)")
 
-            # --- Regular paragraph: translate ---
+        # ------------------------------------------------------------------
+        # Pass 3: batch-translate text records, flushing at section boundaries
+        # ------------------------------------------------------------------
+        total_text = sum(1 for r in records if r["kind"] == "text")
+        translated_count = 0
+        abstract_records: list[dict] = []
+        review_buffers: dict[str, list[tuple]] = {}
+
+        pending: list[dict] = []
+        current_batch_section: str | None = None
+
+        def flush() -> None:
+            nonlocal translated_count
+            if not pending:
+                return
+
+            section = pending[0]["section"] or "BODY"
+            prompt = SECTION_PROMPTS.get(section, DEFAULT_PROMPT)
+            items = [r["raw"] for r in pending]
+
+            _progress(f"Translating {section} ({len(items)} paragraphs)…")
             if verbose:
-                preview = raw[:60].replace('\n', ' ')
-                print(f"[{i:03d}] Translating: {preview}…")
+                print(f"\nTranslating {section} ({len(items)} paragraphs)…")
 
-            lookahead = _get_lookahead(i) if self.lookahead_window > 0 else None
-            translated = self._translate_text(raw, list(history), current_prompt, lookahead=lookahead)
+            translations = self._translate_batch(section, items, prompt, verbose)
 
-            # Strip any LLM-added claim number prefix from every claims paragraph
-            if current_section == "CLAIMS":
-                translated = _LLM_CLAIM_PREFIX_RE.sub('', translated.strip())
-                pending_claim_num = None
+            for r, t in zip(pending, translations):
+                if t is None:
+                    if verbose:
+                        print(f"  Fallback: {r['raw'][:60]}…")
+                    t = self._translate_single(r["raw"], prompt)
 
-            history.append((raw, translated))
-            _replace_text(para, translated, font)
-            section_buffer.append((para, raw, translated))
-            translated_count += 1
-            if translated_count % 10 == 0 or translated_count == total:
-                _progress(f"{translated_count}/{total} paragraphs")
+                if section == "CLAIMS":
+                    t = _LLM_CLAIM_PREFIX_RE.sub('', t.strip())
 
-            if current_section == "ABSTRACT":
-                abstract_last_para = para
-                abstract_texts.append(translated)
+                _replace_text(r["para"], t, font)
+                r["translation"] = t
+
+                if section == "ABSTRACT":
+                    abstract_records.append(r)
+
+                review_buffers.setdefault(section, []).append(
+                    (r["para"], r["raw"], t)
+                )
+
+                translated_count += 1
+
+            _progress(f"{translated_count}/{total_text} paragraphs")
+            pending.clear()
 
             if delay > 0:
                 time.sleep(delay)
 
-        _flush_review()
-        _flush_abstract_word_count()
+        for r in records:
+            if r["kind"] != "text":
+                if r["kind"] == "section_header" and r["mapped"] != current_batch_section:
+                    flush()
+                    current_batch_section = r["mapped"]
+                continue
 
+            section = r["section"]
+            if section != current_batch_section and pending:
+                flush()
+            current_batch_section = section
+            pending.append(r)
+
+            if len(pending) >= self.batch_size:
+                flush()
+
+        flush()
+
+        # ------------------------------------------------------------------
+        # Abstract word count
+        # ------------------------------------------------------------------
+        if abstract_records:
+            count = _word_count(
+                ' '.join(r["translation"] for r in abstract_records if "translation" in r)
+            )
+            _insert_para_after(abstract_records[-1]["para"], f'({count})', font)
+            if verbose:
+                print(f"\nABSTRACT word count → ({count})")
+
+        # ------------------------------------------------------------------
+        # Review pass (per section)
+        # ------------------------------------------------------------------
+        if review:
+            for section_name, buffer in review_buffers.items():
+                if len(buffer) >= 2:
+                    _progress(f"Reviewing {section_name}…")
+                    self._review_section(section_name, buffer, font, verbose)
+                    _progress("Review done")
+
+        # ------------------------------------------------------------------
+        # Save
+        # ------------------------------------------------------------------
         doc.save(output_path)
+        elapsed = time.time() - start_time
+        minutes, seconds = divmod(int(elapsed), 60)
+        elapsed_str = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
+        _progress(f"Done in {elapsed_str} → {output_path}")
         if verbose:
             print(f"\nSaved → {output_path}")
+            print(f"Total time: {elapsed_str}")
