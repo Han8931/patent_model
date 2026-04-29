@@ -79,8 +79,8 @@ SECTION_HEADER_MAP = {
 # No $ — also matches when body text follows on the same paragraph.
 _CLAIM_HEADER_RE = re.compile(r'^[【\[]\s*청구항\s*(\d+)\s*[】\]]\s*')
 
-# Any leading claim-number prefix the LLM might produce: "1.", "1:", "CLAIM 1.", "Claim 1 "
-_LLM_CLAIM_PREFIX_RE = re.compile(r'^(?:CLAIM\s+)?(\d+)[.:\s]\s*', re.IGNORECASE)
+# Any leading claim-number prefix the LLM might produce: "1.", "1:", "CLAIM 1.", "Claims 1."
+_LLM_CLAIM_PREFIX_RE = re.compile(r'^(?:CLAIMS?\s+)?(\d+)[.:\s]\s*', re.IGNORECASE)
 
 _BLANK_RE = re.compile(r'^\s*$')
 

@@ -208,11 +208,18 @@ _REVIEW_SYSTEM = (
 def build_batch_messages(section: str, prompt: "Prompt", items: list[str]) -> list[dict]:
     """Build messages for batch translation of a list of paragraphs."""
     numbered = "\n\n".join(f"[{i}] {text}" for i, text in enumerate(items))
+    extra = ""
+    if section == "CLAIMS":
+        extra = (
+            "Do NOT prepend claim numbers (e.g. '1.', 'Claim 1.', 'Claims 1.') "
+            "— numbering is handled separately.\n"
+        )
     user_content = (
         "Translate each numbered Korean patent paragraph into English.\n"
         "Return translations in the SAME numbered format [0], [1], [2]…\n"
-        "Output ONLY the numbered translations — no commentary, no explanations.\n\n"
-        f"{numbered}"
+        "Output ONLY the numbered translations — no commentary, no explanations.\n"
+        + extra
+        + f"\n{numbered}"
     )
     return [
         {"role": "system", "content": prompt.system},
