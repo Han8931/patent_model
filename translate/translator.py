@@ -413,7 +413,6 @@ class PatentTranslator:
 
         shutil.copy2(input_path, output_path)
         doc = Document(output_path)
-        _normalize_document(doc, font)
 
         def _progress(msg: str) -> None:
             if progress_callback:
