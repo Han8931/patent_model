@@ -207,6 +207,47 @@ def _insert_para_after(ref_para, text: str, font_name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Input normalization
+# ---------------------------------------------------------------------------
+
+# Heading style name prefixes (Word built-in + common Korean equivalents)
+_HEADING_STYLE_PREFIXES = ('heading', '제목', '표제')
+
+# Regex matching any known section-header key at the start of a paragraph,
+# followed by whitespace and more content (i.e. it is a prefix, not the whole text).
+_SECTION_PREFIX_RE = re.compile(
+    r'^(?:' + '|'.join(
+        re.escape(k) for k in sorted(SECTION_HEADER_MAP, key=len, reverse=True)
+    ) + r')\s+'
+)
+
+
+def _normalize_document(doc, font: str) -> None:
+    """Pre-translation normalization of the copied document.
+
+    1. Reset heading paragraph styles → Normal, eliminating Word outline/fold
+       formatting that causes section labels to appear in multiple places.
+    2. Strip embedded section-label prefixes from content paragraphs, e.g.
+       "[발명의 명칭] 반도체 패키지를..." → "반도체 패키지를..."
+    """
+    for para in doc.paragraphs:
+        # Reset heading styles to Normal
+        if para.style and any(
+            para.style.name.lower().startswith(p) for p in _HEADING_STYLE_PREFIXES
+        ):
+            try:
+                para.style = doc.styles['Normal']
+            except KeyError:
+                pass
+
+        # Strip embedded section-label prefix when paragraph has content after it
+        text = para.text
+        m = _SECTION_PREFIX_RE.match(text)
+        if m and m.end() < len(text):
+            _replace_text(para, text[m.end():], font)
+
+
+# ---------------------------------------------------------------------------
 # Translator
 # ---------------------------------------------------------------------------
 
@@ -324,6 +365,7 @@ class PatentTranslator:
 
         shutil.copy2(input_path, output_path)
         doc = Document(output_path)
+        _normalize_document(doc, font)
 
         paragraphs = list(doc.paragraphs)   # pre-collected for lookahead
 
