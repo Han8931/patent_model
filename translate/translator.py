@@ -44,7 +44,6 @@ SECTION_HEADER_MAP = {
     "[특허청구범위]":                   "CLAIMS",
     "[청구범위]":                       "CLAIMS",       # alternate form used in this doc
     "[요약서]":                         "ABSTRACT",
-    "[요약]":                           "ABSTRACT",     # sub-heading that appears after [요약서]
     "[발명의 효과]":                    "ADVANTAGEOUS EFFECTS OF INVENTION",
     "[기술적 과제]":                    "TECHNICAL PROBLEM",
     "[과제의 해결 수단]":               "SOLUTION TO PROBLEM",
