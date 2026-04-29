@@ -75,8 +75,9 @@ SECTION_HEADER_MAP = {
     "대표도":                           "REPRESENTATIVE FIGURE",
 }
 
-# Korean claim header: 【청구항 N】 or [청구항 N] (with optional spaces)
-_CLAIM_HEADER_RE = re.compile(r'^[【\[]\s*청구항\s*(\d+)\s*[】\]]\s*$')
+# Korean claim header: 【청구항 N】 or [청구항 N] (with optional spaces).
+# No $ — also matches when body text follows on the same paragraph.
+_CLAIM_HEADER_RE = re.compile(r'^[【\[]\s*청구항\s*(\d+)\s*[】\]]\s*')
 
 # Any leading claim-number prefix the LLM might produce: "1.", "1:", "CLAIM 1.", "Claim 1 "
 _LLM_CLAIM_PREFIX_RE = re.compile(r'^(?:CLAIM\s+)?(\d+)[.:\s]\s*', re.IGNORECASE)
@@ -446,8 +447,18 @@ class PatentTranslator:
 
             m = _CLAIM_HEADER_RE.match(stripped)
             if m and current_section == "CLAIMS":
-                records.append({"kind": "claim_header", "para": para, "raw": raw,
-                                 "section": current_section, "claim_num": int(m.group(1))})
+                claim_num = int(m.group(1))
+                body = stripped[m.end():]
+                if not body:
+                    # Standalone header paragraph: write "N." directly in Pass 2
+                    records.append({"kind": "claim_header", "para": para, "raw": raw,
+                                     "section": current_section, "claim_num": claim_num})
+                else:
+                    # Header + body in one paragraph: translate body, then prepend "N. "
+                    records.append({"kind": "text", "para": para, "raw": body,
+                                     "section": current_section,
+                                     "mixed": _has_non_text_content(para),
+                                     "claim_num": claim_num})
                 continue
 
             records.append({"kind": "text", "para": para, "raw": raw,
@@ -505,6 +516,8 @@ class PatentTranslator:
 
                 if section == "CLAIMS":
                     t = _LLM_CLAIM_PREFIX_RE.sub('', t.strip())
+                    if r.get("claim_num") is not None:
+                        t = f"{r['claim_num']}. {t}"
 
                 _replace_text(r["para"], t, font)
                 r["translation"] = t
