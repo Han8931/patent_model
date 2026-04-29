@@ -51,14 +51,6 @@ SECTION_HEADER_MAP = {
     "대표도":                           "REPRESENTATIVE FIGURE",
 }
 
-# Sub-headings that should be silently blanked when inside a specific section.
-# [요약] means "summary/abstract" and appears as a redundant sub-heading inside
-# the [요약서] abstract section — safe to blank there, but must NOT be in
-# SECTION_HEADER_MAP because it also appears in the description body.
-_SECTION_BLANK_HEADERS: dict[str, set[str]] = {
-    "ABSTRACT": {"[요약]"},
-}
-
 # Korean claim header: 【청구항 N】 or [청구항 N] (with optional spaces)
 _CLAIM_HEADER_RE = re.compile(r'^[【\[]\s*청구항\s*(\d+)\s*[】\]]\s*$')
 
@@ -213,6 +205,12 @@ def _insert_para_after(ref_para, text: str, font_name: str) -> None:
 # Heading style name prefixes (Word built-in + common Korean equivalents)
 _HEADING_STYLE_PREFIXES = ('heading', '제목', '표제')
 
+# Standalone paragraphs to blank unconditionally before translation.
+# [요약] ("summary") is a redundant sub-heading that appears both inside the
+# [요약서] abstract section and sometimes in the description body — blanking it
+# everywhere is safe because [요약서] alone is sufficient to trigger ABSTRACT mode.
+_UNCONDITIONAL_BLANK = {"[요약]"}
+
 # Regex matching any known section-header key at the start of a paragraph,
 # followed by whitespace and more content (i.e. it is a prefix, not the whole text).
 _SECTION_PREFIX_RE = re.compile(
@@ -225,12 +223,20 @@ _SECTION_PREFIX_RE = re.compile(
 def _normalize_document(doc, font: str) -> None:
     """Pre-translation normalization of the copied document.
 
-    1. Reset heading paragraph styles → Normal, eliminating Word outline/fold
+    1. Blank unconditionally problematic sub-headings (e.g. [요약]).
+    2. Reset heading paragraph styles → Normal, eliminating Word outline/fold
        formatting that causes section labels to appear in multiple places.
-    2. Strip embedded section-label prefixes from content paragraphs, e.g.
+    3. Strip embedded section-label prefixes from content paragraphs, e.g.
        "[발명의 명칭] 반도체 패키지를..." → "반도체 패키지를..."
     """
     for para in doc.paragraphs:
+        text = para.text.strip()
+
+        # Blank known redundant sub-headings regardless of position
+        if text in _UNCONDITIONAL_BLANK:
+            _replace_text(para, '', font)
+            continue
+
         # Reset heading styles to Normal
         if para.style and any(
             para.style.name.lower().startswith(p) for p in _HEADING_STYLE_PREFIXES
@@ -241,10 +247,9 @@ def _normalize_document(doc, font: str) -> None:
                 pass
 
         # Strip embedded section-label prefix when paragraph has content after it
-        text = para.text
-        m = _SECTION_PREFIX_RE.match(text)
-        if m and m.end() < len(text):
-            _replace_text(para, text[m.end():], font)
+        m = _SECTION_PREFIX_RE.match(para.text)
+        if m and m.end() < len(para.text):
+            _replace_text(para, para.text[m.end():], font)
 
 
 # ---------------------------------------------------------------------------
@@ -435,12 +440,6 @@ class PatentTranslator:
                 if verbose:
                     print(f"[{i:03d}] MIXED (equation+text) — translating text")
 
-            # --- Context-sensitive blank headers ---
-            if raw.strip() in _SECTION_BLANK_HEADERS.get(current_section, set()):
-                _replace_text(para, '', font)
-                if verbose:
-                    print(f"[{i:03d}] BLANKED sub-header '{raw.strip()}' in {current_section}")
-                continue
 
             # --- Section header ---
             mapped = SECTION_HEADER_MAP.get(raw.strip())
