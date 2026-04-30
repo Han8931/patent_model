@@ -35,7 +35,7 @@ WORKERS = 2          # parallel files; keep ≤ Ollama concurrency limit
 BATCH_SIZE = 10      # max paragraphs per section batch sent to the LLM
 REVIEW = True        # run post-translation review pass per section
 FONT = "Times New Roman"
-DELAY = 0.5          # seconds between API calls within one file
+DELAY = 0.0          # seconds between API calls within one file (raise only if rate-limited)
 
 
 # ---------------------------------------------------------------------------

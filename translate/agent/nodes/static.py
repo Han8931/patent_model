@@ -15,7 +15,6 @@ def apply_static(state: TranslationState) -> dict:
     for r in records:
         if r.kind == "section_header":
             replace_text(r.para, r.mapped or "", font)
-            progress(f"→ {r.mapped}")
             if verbose:
                 print(f"HEADER → {r.mapped}")
         elif r.kind == "claim_header":

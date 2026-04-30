@@ -13,16 +13,43 @@ _M = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
 _XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space'
 
 
+def has_drawing(para) -> bool:
+    """True iff the paragraph contains a real <w:drawing> (image/figure)."""
+    return para._p.find('.//{%s}drawing' % _W) is not None
+
+
+def has_math(para) -> bool:
+    """True iff the paragraph contains an <m:oMath> equation."""
+    return para._p.find('.//{%s}oMath' % _M) is not None
+
+
 def has_non_text_content(para) -> bool:
-    p = para._p
-    return (
-        p.find('.//{%s}drawing' % _W) is not None or
-        p.find('.//{%s}oMath' % _M) is not None
-    )
+    """Backwards-compat alias — true if the paragraph has math OR drawing."""
+    return has_drawing(para) or has_math(para)
 
 
 def text_runs(para) -> list:
     return [r for r in para.runs if r.text]
+
+
+def extract_all_text(para) -> str:
+    """Concatenate text from <w:t> AND <m:t> in document order.
+
+    Korean equation paragraphs often embed Korean labels or 'where ...' clauses
+    inside <m:t> elements; para.text only returns <w:t> content and misses them.
+    Use a w:br as a soft separator to mirror Word's visual line breaks.
+    """
+    p = para._p
+    parts: list[str] = []
+    for el in p.iter():
+        tag = el.tag
+        local = tag.split('}')[-1] if '}' in tag else tag
+        if local == 't':
+            if el.text:
+                parts.append(el.text)
+        elif local == 'br':
+            parts.append('\n')
+    return ''.join(parts)
 
 
 def write_run_with_breaks(run, text: str, font_name: str) -> None:

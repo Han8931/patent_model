@@ -31,10 +31,12 @@ def translate_claims(state: TranslationState) -> dict:
 
     independent_categories: dict[int, str] = {}
 
+    progress(f"Translating CLAIMS ({len(chunks)} claims)…")
     for chunk in chunks:
         if chunk.claim_num is None:
             continue
-        progress(f"CLAIM {chunk.claim_num}")
+        if verbose:
+            print(f"  CLAIM {chunk.claim_num}")
         try:
             raw = client.complete(build_claim_messages(
                 chunk.claim_num, chunk.text, glossary,

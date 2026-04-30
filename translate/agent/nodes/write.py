@@ -46,8 +46,6 @@ def write(state: TranslationState) -> dict:
     for idx, r in by_index.items():
         indexed_records[idx] = r
 
-    progress("Writing translations…")
-
     # Apply body, abstract, claims chunks
     for chunk in state.get("chunks_body", []):
         _apply_chunk(chunk, indexed_records, font)

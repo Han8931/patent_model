@@ -21,8 +21,10 @@ def translate_body(state: TranslationState) -> dict:
     progress = state.get("progress") or (lambda _: None)
     verbose = state.get("verbose", False)
 
+    progress(f"Translating BODY ({len(chunks)} chunks)…")
     for i, chunk in enumerate(chunks, 1):
-        progress(f"BODY {i}/{len(chunks)} ({chunk.section})")
+        if verbose:
+            print(f"  BODY {i}/{len(chunks)} ({chunk.section})")
         try:
             raw = client.complete(build_body_messages(chunk.text, glossary))
             data = extract_json_block(raw) or {}

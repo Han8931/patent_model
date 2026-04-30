@@ -48,8 +48,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--delay",
         type=float,
-        default=0.5,
-        help="Seconds to wait between API calls (default: 0.5)",
+        default=0.0,
+        help="Seconds to wait between API calls (default: 0.0; set >0 only if your provider rate-limits)",
     )
     parser.add_argument(
         "--batch-size",

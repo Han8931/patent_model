@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
-from ..docx_utils import has_non_text_content, text_runs
+import re
+
+from ..docx_utils import (
+    extract_all_text,
+    has_drawing,
+    has_math,
+    has_non_text_content,
+)
 from ..sections import (
     BLANK_RE,
     CLAIM_HEADER_RE,
     SECTION_HEADER_MAP,
 )
 from ..state import ParagraphRecord, TranslationState
+
+# Hangul block — used to decide whether a math-only paragraph's <m:t> content
+# is real Korean text (translate it) or just math notation (preserve as image).
+_HANGUL_RE = re.compile(r'[가-힯]')
 
 
 # Fallback abstract markers — used only when ABSTRACT hasn't been detected yet.
@@ -24,17 +35,30 @@ def classify(state: TranslationState) -> dict:
     current_section: str | None = None
 
     for idx, para in enumerate(doc.paragraphs):
-        raw = para.text
+        # Pull text from <w:t> AND <m:t> so equation-embedded Korean is visible.
+        raw = extract_all_text(para)
         stripped = raw.strip()
 
-        if BLANK_RE.match(raw):
+        # Truly blank paragraph (no text anywhere, no drawing, no math).
+        if not stripped and not has_non_text_content(para):
             records.append(ParagraphRecord(
                 index=idx, kind="blank", para=para,
                 section=current_section,
             ))
             continue
 
-        if has_non_text_content(para) and not text_runs(para):
+        # Real images/figures: <w:drawing>. These have nothing to translate.
+        if has_drawing(para) and not stripped:
+            records.append(ParagraphRecord(
+                index=idx, kind="image", para=para,
+                section=current_section,
+            ))
+            continue
+
+        # Math-only paragraphs: preserve as image when there's no extractable
+        # text, OR when the only extractable text is math notation (no Hangul).
+        # Math paragraphs with embedded Korean labels fall through to translation.
+        if has_math(para) and not has_drawing(para) and not _HANGUL_RE.search(stripped):
             records.append(ParagraphRecord(
                 index=idx, kind="image", para=para,
                 section=current_section,

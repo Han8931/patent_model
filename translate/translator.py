@@ -26,7 +26,7 @@ class PatentTranslator:
         output_path: str | Path,
         *,
         font: str = "Times New Roman",
-        delay: float = 0.5,
+        delay: float = 0.0,
         verbose: bool = True,
         review: bool = True,
         progress_callback: Callable[[str], None] | None = None,
