@@ -4,15 +4,27 @@ from __future__ import annotations
 
 import time
 
-from ..docx_utils import has_non_text_content, insert_para_after, replace_text, word_count
+from ..docx_utils import (
+    consolidate_formula_math_into,
+    has_non_text_content,
+    insert_para_after,
+    replace_text,
+    word_count,
+)
 from ..state import Chunk, TranslationState
 
 
 def _apply_chunk(chunk: Chunk, records, font: str) -> None:
     """Write the chunk's translation into the FIRST paragraph; blank the rest.
 
+    For multi-paragraph chunks (typical for claims and merged body sections),
+    formula equations from trailing paragraphs are first MOVED into the head
+    paragraph. Then replace_text() can interleave the translation text around
+    those equations using its [EQUATION] placeholder splitting logic, keeping
+    the English text and the formula visually together inside one paragraph.
+
     If the translation is empty/missing, leave the original paragraph untouched
-    (rather than blanking it) so the source text remains visible as a flag.
+    so the source text remains visible as a flag.
     """
     if not chunk.paragraph_indices:
         return
@@ -21,12 +33,19 @@ def _apply_chunk(chunk: Chunk, records, font: str) -> None:
 
     head_idx = chunk.paragraph_indices[0]
     head_record = records[head_idx]
+    trailing = [records[idx].para for idx in chunk.paragraph_indices[1:]]
+
+    # Pull formula equations out of trailing paragraphs and append to the head
+    # so [EQUATION] placeholders in the translation can be interleaved with
+    # actual <m:oMath> elements that now live in the head paragraph.
+    if trailing:
+        consolidate_formula_math_into(head_record.para, trailing)
+
     replace_text(head_record.para, chunk.translation, font)
 
-    # Blank the trailing paragraphs of the chunk. replace_text only modifies
-    # <w:r> text runs — any <m:oMath>/<w:drawing> elements in these paragraphs
-    # are left intact, so equations remain rendered while their Korean text
-    # is cleared.
+    # Blank the trailing paragraphs. replace_text only modifies <w:r> text runs;
+    # any leftover XML (drawings, Korean math being removed) is handled inside
+    # replace_text. After consolidation, formula equations are no longer here.
     for idx in chunk.paragraph_indices[1:]:
         replace_text(records[idx].para, "", font)
 

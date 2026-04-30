@@ -129,6 +129,35 @@ def _strip_equation_placeholders(text: str) -> str:
     return _EQUATION_PLACEHOLDER_RE.sub(' ', text).strip()
 
 
+def consolidate_formula_math_into(target_para, source_paras) -> int:
+    """Detach formula <m:oMath> from each source paragraph and append to target.
+
+    Used when a translation chunk spans multiple paragraphs but the equations
+    live in trailing paragraphs. Moving them into the head paragraph lets
+    _replace_text_with_math_placeholders interleave the translation around
+    them inside a single paragraph, keeping equations visually aligned with
+    the English text that references them.
+
+    Equations whose text contains Hangul are NOT moved — they will be removed
+    by _remove_korean_math during the head's replace_text call (their Korean
+    content is replaced by the translation in the head).
+
+    Returns the number of equations moved.
+    """
+    moved = 0
+    target_p = target_para._p
+    for src_para in source_paras:
+        for math_el in list(_top_level_math_elements(src_para)):
+            if _HANGUL_RE.search(_element_text(math_el)):
+                continue  # Korean math will be removed elsewhere
+            parent = math_el.getparent()
+            if parent is not None:
+                parent.remove(math_el)
+            target_p.append(math_el)
+            moved += 1
+    return moved
+
+
 def write_run_with_breaks(run, text: str, font_name: str) -> None:
     """Replace run content; convert \\n into <w:br/> elements."""
     r = run._r
