@@ -3,10 +3,16 @@
 The chunk's first paragraph_index is the standalone claim_header paragraph (when
 present). The translated "N. <claim>" text is written to that paragraph by the
 write node; all other paragraphs in the chunk are blanked.
+
+Math-only equation paragraphs are classified as image records so they can be
+preserved, but inside claims they still belong to the claim text. Include them
+as [EQUATION] placeholders so the LLM sees the limitation and the write node can
+move the actual Word equation XML into the translated claim paragraph.
 """
 
 from __future__ import annotations
 
+from ..docx_utils import extract_all_text, has_drawing, has_math
 from ..state import Chunk, TranslationState
 
 
@@ -67,6 +73,17 @@ def chunk_claims(state: TranslationState) -> dict:
                 header_index = None
             current_indices.append(r.index)
             current_text_parts.append(r.raw)
+            continue
+
+        if (
+            r.kind == "image"
+            and r.section == "CLAIMS"
+            and current_claim_num is not None
+            and has_math(r.para)
+            and not has_drawing(r.para)
+        ):
+            current_indices.append(r.index)
+            current_text_parts.append(extract_all_text(r.para) or "[EQUATION]")
 
     flush()
     return {"chunks_claims": chunks}
