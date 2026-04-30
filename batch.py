@@ -1,9 +1,17 @@
 """Batch patent translation — process multiple files in parallel.
 
 File source: either a local list or an S3 bucket (configured via .env).
-Edit the CONFIGURATION section below before running.
+Edit the CONFIGURATION section below before running, or pass overrides on the CLI:
+
+    uv run batch.py                                # use defaults below
+    uv run batch.py --suffix _translated           # output: <stem>_translated.docx
+    uv run batch.py --output-dir results           # write into ./results/
+    uv run batch.py --output-name foo.docx         # SINGLE-input only: explicit filename
+
+The --output-name flag is only honored when there is exactly one input file.
 """
 
+import argparse
 import multiprocessing as mp
 import traceback
 from dataclasses import asdict
@@ -28,6 +36,7 @@ LOCAL_DIRS: list[str] = [
 ]
 
 OUTPUT_DIR = Path("output")
+OUTPUT_SUFFIX = "_en"   # appended to <input_stem> when no --output-name is given
 
 CONFIG = ClientConfig.from_env()   # reads LLM_* variables from .env
 
@@ -93,18 +102,57 @@ def _resolve_files() -> list[Path]:
     return _scan_dirs(LOCAL_DIRS)
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Batch patent translation."
+    )
+    parser.add_argument(
+        "--output-dir", type=Path, default=OUTPUT_DIR,
+        help=f"Directory for translated files (default: {OUTPUT_DIR}).",
+    )
+    parser.add_argument(
+        "--suffix", default=OUTPUT_SUFFIX,
+        help=f"Suffix appended to <stem> when --output-name is not used "
+             f"(default: '{OUTPUT_SUFFIX}', producing '<stem>{OUTPUT_SUFFIX}.docx').",
+    )
+    parser.add_argument(
+        "--output-name", type=str, default=None,
+        help="Explicit output filename (e.g. 'mydoc_en.docx'). Only valid for a "
+             "single input file; ignored with a warning if multiple inputs are found.",
+    )
+    return parser.parse_args()
+
+
+def _output_path_for(inp: Path, args: argparse.Namespace, single_input: bool) -> Path:
+    if single_input and args.output_name:
+        name = args.output_name
+        if not name.lower().endswith(".docx"):
+            name += ".docx"
+        return args.output_dir / name
+    return args.output_dir / f"{inp.stem}{args.suffix}.docx"
+
+
 def main() -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    args = _parse_args()
+    args.output_dir.mkdir(parents=True, exist_ok=True)
 
     input_files = _resolve_files()
     if not input_files:
         print("No input files found. Exiting.")
         return
 
+    if args.output_name and len(input_files) != 1:
+        print(
+            f"Warning: --output-name is ignored because {len(input_files)} input "
+            f"files were found; using --suffix='{args.suffix}' instead.",
+            flush=True,
+        )
+
+    single = len(input_files) == 1
     jobs = [
         {
             "input":          str(inp),
-            "output":         str(OUTPUT_DIR / f"{inp.stem}_en.docx"),
+            "output":         str(_output_path_for(inp, args, single)),
             "config":      asdict(CONFIG),
             "batch_size":  BATCH_SIZE,
             "review":      REVIEW,
