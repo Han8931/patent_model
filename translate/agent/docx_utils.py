@@ -47,9 +47,18 @@ def write_run_with_breaks(run, text: str, font_name: str) -> None:
 
 
 def replace_text(para, new_text: str, font_name: str) -> None:
-    """Write new_text into the paragraph's text runs, leaving non-text XML untouched."""
+    """Write new_text into the paragraph's text runs, leaving non-text XML untouched.
+
+    If the paragraph has no text runs but DOES have non-text content (e.g. an
+    equation), a new <w:r><w:t>...</w:t></w:r> is inserted at the start so the
+    translation is rendered alongside the equation.
+    """
     runs = text_runs(para)
     if not runs:
+        if not new_text:
+            return
+        if has_non_text_content(para):
+            _prepend_text_run(para, new_text, font_name)
         return
     write_run_with_breaks(runs[0], new_text, font_name)
     for run in runs[1:]:
@@ -57,6 +66,35 @@ def replace_text(para, new_text: str, font_name: str) -> None:
         run.font.name = font_name
     for run in para.runs:
         run.font.name = font_name
+
+
+def _prepend_text_run(para, text: str, font_name: str) -> None:
+    """Insert a new <w:r><w:t>...</w:t></w:r> as the first child of <w:p>."""
+    new_r = OxmlElement('w:r')
+    new_rpr = OxmlElement('w:rPr')
+    new_rFonts = OxmlElement('w:rFonts')
+    new_rFonts.set(qn('w:ascii'), font_name)
+    new_rFonts.set(qn('w:hAnsi'), font_name)
+    new_rpr.append(new_rFonts)
+    new_r.append(new_rpr)
+
+    parts = text.split('\n')
+    for idx, part in enumerate(parts):
+        t = OxmlElement('w:t')
+        if part.startswith(' ') or part.endswith(' '):
+            t.set(_XML_SPACE, 'preserve')
+        t.text = part
+        new_r.append(t)
+        if idx < len(parts) - 1:
+            new_r.append(OxmlElement('w:br'))
+
+    # Insert after <w:pPr> if present, otherwise at the start
+    p = para._p
+    pPr = p.find(qn('w:pPr'))
+    if pPr is not None:
+        pPr.addnext(new_r)
+    else:
+        p.insert(0, new_r)
 
 
 def insert_para_after(ref_para, text: str, font_name: str) -> None:

@@ -23,14 +23,12 @@ def _apply_chunk(chunk: Chunk, records, font: str) -> None:
     head_record = records[head_idx]
     replace_text(head_record.para, chunk.translation, font)
 
+    # Blank the trailing paragraphs of the chunk. replace_text only modifies
+    # <w:r> text runs — any <m:oMath>/<w:drawing> elements in these paragraphs
+    # are left intact, so equations remain rendered while their Korean text
+    # is cleared.
     for idx in chunk.paragraph_indices[1:]:
-        rec = records[idx]
-        # Don't blank a paragraph that carries an equation or drawing — clearing its
-        # text runs would strand the equation visually. Leave the original Korean
-        # text in place so the equation keeps its surrounding context.
-        if has_non_text_content(rec.para):
-            continue
-        replace_text(rec.para, "", font)
+        replace_text(records[idx].para, "", font)
 
 
 def write(state: TranslationState) -> dict:

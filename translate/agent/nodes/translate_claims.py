@@ -1,4 +1,11 @@
-"""translate_claims — one LLM call per claim; track independent claim categories."""
+"""translate_claims — one LLM call per claim; track independent claim categories.
+
+If a claim body contains paragraphs with embedded equations, their Korean text is
+included in the chunk text sent to the LLM and the merged English claim sentence
+is written into the FIRST paragraph of the chunk (the claim header). All other
+paragraphs in the chunk get blanked text-wise — equation XML is preserved
+because replace_text only touches <w:r> runs, not <m:oMath> elements.
+"""
 
 from __future__ import annotations
 
