@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import re
 import time
 
 from ..docx_utils import (
     consolidate_formula_math_into,
+    has_drawing,
+    has_math,
     has_non_text_content,
     insert_para_after,
     replace_text,
@@ -14,14 +17,88 @@ from ..docx_utils import (
 from ..state import Chunk, TranslationState
 
 
+_EQUATION_TOKEN_RE = re.compile(r'\[EQUATION(?:_\d+)?\]')
+
+
+def _claim_equation_indices(chunk: Chunk, records) -> list[int]:
+    return [
+        idx for idx in chunk.paragraph_indices[1:]
+        if has_math(records[idx].para) and not has_drawing(records[idx].para)
+    ]
+
+
+def _next_text_paragraph_index(
+    chunk: Chunk,
+    records,
+    after_idx: int,
+    used: set[int],
+    equation_indices: set[int],
+) -> int | None:
+    for idx in chunk.paragraph_indices:
+        if idx <= after_idx or idx in used or idx in equation_indices:
+            continue
+        if not has_non_text_content(records[idx].para):
+            return idx
+    return None
+
+
+def _apply_claim_with_equations(chunk: Chunk, records, font: str) -> bool:
+    """Apply a translated claim while preserving equation paragraph alignment."""
+    equation_indices = _claim_equation_indices(chunk, records)
+    if not equation_indices:
+        return False
+
+    translation = chunk.translation or ""
+    head_idx = chunk.paragraph_indices[0]
+    used_text_indices = {head_idx}
+
+    if _EQUATION_TOKEN_RE.search(translation):
+        parts = _EQUATION_TOKEN_RE.split(translation, maxsplit=len(equation_indices))
+        while len(parts) < len(equation_indices) + 1:
+            parts.append("")
+    else:
+        # If the LLM drops the marker, keep the equations in place and put the
+        # translated claim text before them rather than forcing inline layout.
+        parts = [translation] + [""] * len(equation_indices)
+
+    replace_text(records[head_idx].para, parts[0].strip(), font)
+
+    for eq_idx in equation_indices:
+        # Clear any surrounding Korean text but leave the equation XML and its
+        # original paragraph formatting/alignment untouched.
+        replace_text(records[eq_idx].para, "", font)
+
+    equation_set = set(equation_indices)
+    for pos, eq_idx in enumerate(equation_indices, start=1):
+        segment = _EQUATION_TOKEN_RE.sub("", parts[pos]).strip()
+        if not segment:
+            continue
+
+        target_idx = _next_text_paragraph_index(
+            chunk, records, eq_idx, used_text_indices, equation_set
+        )
+        if target_idx is None:
+            insert_para_after(records[eq_idx].para, segment, font)
+            continue
+
+        replace_text(records[target_idx].para, segment, font)
+        used_text_indices.add(target_idx)
+
+    for idx in chunk.paragraph_indices[1:]:
+        if idx in equation_set or idx in used_text_indices:
+            continue
+        replace_text(records[idx].para, "", font)
+
+    return True
+
+
 def _apply_chunk(chunk: Chunk, records, font: str) -> None:
     """Write the chunk's translation into the FIRST paragraph; blank the rest.
 
-    For multi-paragraph chunks (typical for claims and merged body sections),
-    formula equations from trailing paragraphs are first MOVED into the head
-    paragraph. Then replace_text() can interleave the translation text around
-    those equations using its [EQUATION] placeholder splitting logic, keeping
-    the English text and the formula visually together inside one paragraph.
+    Claims with standalone equation paragraphs are handled separately so Word's
+    original equation paragraph alignment is preserved. For other multi-paragraph
+    chunks, formula equations from trailing paragraphs are moved into the head
+    paragraph so replace_text() can interleave text around [EQUATION] markers.
 
     If the translation is empty/missing, leave the original paragraph untouched
     so the source text remains visible as a flag.
@@ -30,6 +107,9 @@ def _apply_chunk(chunk: Chunk, records, font: str) -> None:
         return
     if not chunk.translation or not chunk.translation.strip():
         return  # leave Korean visible — better than silent disappearance
+
+    if chunk.kind == "claim" and _apply_claim_with_equations(chunk, records, font):
+        return
 
     head_idx = chunk.paragraph_indices[0]
     head_record = records[head_idx]
