@@ -233,9 +233,16 @@ def build_batch_messages(section: str, prompt: "Prompt", items: list[str]) -> li
 
     if section == "CLAIMS":
         extra = (
-            "Do NOT prepend claim numbers (e.g. '1.', 'Claim 1.', 'Claims 1.') "
+            "CLAIMS MERGING RULE (CRITICAL):\n"
+            "A single Korean claim is often split across multiple items — a preamble line,\n"
+            "element lines, a closing phrase. Merge all items that belong to the SAME claim\n"
+            "into ONE coherent English claim sentence:\n"
+            "  - Put the complete merged claim text in the FIRST item's slot.\n"
+            "  - Output an empty string '' for every absorbed item of that claim.\n"
+            "  - NEVER merge items from different claim numbers together.\n"
+            "  - NEVER merge across claim boundaries.\n"
+            "Do NOT prepend claim numbers (e.g. '1.', 'Claim 1.', 'Claims 1.')\n"
             "— numbering is handled separately.\n"
-            "Output one translation per input item. Do not merge items.\n"
         )
     else:
         extra = (
