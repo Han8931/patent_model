@@ -182,8 +182,13 @@ PROMPT_CLAIMS = register_prompt(Prompt(
         "  The ONLY allowed reference style is: 'The <category> of claim <N>, ...'\n"
         "\n"
         "FORMATTING:\n"
-        "- Insert a newline after every ':' and every ';' in claim text.\n"
-        "  Example: '... comprising:\\ntransmitting ...;\\nreceiving ...;\\nand outputting ...'\n"
+        "- After ':' and after each ';', insert a newline to list elements on separate lines.\n"
+        "- Do NOT capitalize the first word after ':', ';', or 'wherein' unless it is a proper noun.\n"
+        "  Correct:   '... comprising:\\na first die;\\na second die.'\n"
+        "  Incorrect: '... comprising:\\nA first die;\\nA second die.'\n"
+        "- 'wherein' introduces a limitation — the word after 'wherein' must be lowercase.\n"
+        "  Correct:   ', wherein the first groove has a first depth'\n"
+        "  Incorrect: ', wherein The first groove has a first depth'\n"
         "- Maintain antecedent basis: introduce with 'a/an', refer back with 'the'.\n"
         "- Use 'wherein' (not 'where') for limitations.\n"
         "- Keep each claim as one sentence.\n"
@@ -233,28 +238,12 @@ def build_batch_messages(section: str, prompt: "Prompt", items: list[str]) -> li
 
     if section == "CLAIMS":
         extra = (
-            "CLAIMS MERGING RULE (CRITICAL):\n"
-            "A single Korean claim is often split across multiple items — a preamble line,\n"
-            "element lines, a closing phrase. Merge all items that belong to the SAME claim\n"
-            "into ONE coherent English claim sentence:\n"
-            "  - Put the complete merged claim text in the FIRST item's slot.\n"
-            "  - Output an empty string '' for every absorbed item of that claim.\n"
-            "  - NEVER merge items from different claim numbers together.\n"
-            "  - NEVER merge across claim boundaries.\n"
             "Do NOT prepend claim numbers (e.g. '1.', 'Claim 1.', 'Claims 1.')\n"
             "— numbering is handled separately.\n"
+            "Output exactly one translation per input item. Do not merge or skip items.\n"
         )
     else:
-        extra = (
-            "MERGING RULE: Korean source paragraphs sometimes split a single logical\n"
-            "sentence across multiple items. If adjacent items form one coherent sentence\n"
-            "or thought, merge them:\n"
-            "  - Put the full merged translation in the FIRST item's slot.\n"
-            "  - Output an empty string for every absorbed item.\n"
-            "  - Only merge items that are clearly incomplete on their own\n"
-            "    (dangling clauses, continuation phrases, split lists).\n"
-            "  - Do NOT merge across independent thoughts or section boundaries.\n"
-        )
+        extra = ""
 
     user_content = (
         "Translate each numbered Korean patent paragraph into English.\n"

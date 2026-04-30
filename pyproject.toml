@@ -9,4 +9,5 @@ dependencies = [
     "python-docx",
     "boto3",
     "python-dotenv",
+    "langgraph",
 ]
