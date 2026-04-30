@@ -1,4 +1,13 @@
-"""chunk_body — greedy join: merge a paragraph with the next when it ends with ':' or ','."""
+"""chunk_body — greedy join: merge a paragraph with the next when it ends with ':' or ','.
+
+Boundary rules:
+  - A paragraph that contains an embedded equation/image (mixed=True) is a hard boundary.
+    It becomes its own singleton chunk and is never absorbed into a neighbor; doing so
+    would either blank the paragraph's text runs (losing the equation context) or strand
+    the equation in the wrong location.
+  - Index gaps (e.g. a pure-equation paragraph sitting between two text records) also
+    break the merge — only consecutive paragraph indices are eligible to join.
+"""
 
 from __future__ import annotations
 
@@ -19,7 +28,6 @@ def chunk_body(state: TranslationState) -> dict:
     records = state["records"]
     chunks: list[Chunk] = []
 
-    # Walk all text records that belong to body sections (or have no recognised section).
     body_records = [
         r for r in records
         if r.kind == "text"
@@ -31,14 +39,26 @@ def chunk_body(state: TranslationState) -> dict:
     while i < len(body_records):
         head = body_records[i]
         group = [head]
-        # Greedy: consume following records as long as the previous ends in : or ,
-        # and stays inside the same section.
-        while (
-            _is_continuation(group[-1].raw)
-            and i + len(group) < len(body_records)
-            and body_records[i + len(group)].section == head.section
-        ):
-            group.append(body_records[i + len(group)])
+
+        # Mixed paragraphs (text + equation) are singleton chunks — never merge into them
+        # or out of them.
+        if not head.mixed:
+            while i + len(group) < len(body_records):
+                tail = group[-1]
+                nxt = body_records[i + len(group)]
+                # Stop at section boundary
+                if nxt.section != head.section:
+                    break
+                # Stop on index gap (e.g. an image paragraph sat between)
+                if nxt.index != tail.index + 1:
+                    break
+                # Stop if the next paragraph is mixed (it must stand alone)
+                if nxt.mixed:
+                    break
+                # Continue only if the previous paragraph clearly didn't finish
+                if not _is_continuation(tail.raw):
+                    break
+                group.append(nxt)
 
         chunks.append(Chunk(
             id=f"body-{chunk_idx}",

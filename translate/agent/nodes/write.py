@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from ..docx_utils import insert_para_after, replace_text, word_count
+from ..docx_utils import has_non_text_content, insert_para_after, replace_text, word_count
 from ..state import Chunk, TranslationState
 
 
@@ -24,7 +24,13 @@ def _apply_chunk(chunk: Chunk, records, font: str) -> None:
     replace_text(head_record.para, chunk.translation, font)
 
     for idx in chunk.paragraph_indices[1:]:
-        replace_text(records[idx].para, "", font)
+        rec = records[idx]
+        # Don't blank a paragraph that carries an equation or drawing — clearing its
+        # text runs would strand the equation visually. Leave the original Korean
+        # text in place so the equation keeps its surrounding context.
+        if has_non_text_content(rec.para):
+            continue
+        replace_text(rec.para, "", font)
 
 
 def write(state: TranslationState) -> dict:
