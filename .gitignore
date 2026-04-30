@@ -8,6 +8,7 @@ wheels/
 data/
 output/
 uv.lock
+*.docx
 
 # Virtual environments
 .venv

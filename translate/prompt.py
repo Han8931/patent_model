@@ -35,6 +35,8 @@ _STYLE_RULES = (
     "  Examples: '도 1' → 'FIG. 1',  '도 5a' → 'FIG. 5A'.\n"
     "- Translate '상면' as 'upper surface' and '하면' as 'lower surface' consistently.\n"
     "- Keep named entities, reference numerals, symbols, units, and formulas exactly as-is.\n"
+    "- If the input contains [EQUATION], keep that marker exactly where the equation belongs;\n"
+    "  it represents a preserved Word equation and must not be translated, expanded, or described.\n"
     "- Output ONLY the translated text — no commentary, explanations, or notes.\n"
 )
 

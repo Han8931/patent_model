@@ -21,16 +21,14 @@ def translate_body(state: TranslationState) -> dict:
     progress = state.get("progress") or (lambda _: None)
     verbose = state.get("verbose", False)
 
-    progress(f"Translating BODY ({len(chunks)} chunks)…")
+    total = len(chunks)
+    progress(f"Translating BODY ({total} chunks)…")
     for i, chunk in enumerate(chunks, 1):
-        if verbose:
-            print(f"  BODY {i}/{len(chunks)} ({chunk.section})")
         try:
             raw = client.complete(build_body_messages(chunk.text, glossary))
             data = extract_json_block(raw) or {}
             text = (data.get("text") or "").strip()
             if not text:
-                # Treat as fallback: keep raw text as the translation candidate
                 text = raw.strip()
             chunk.translation = postprocess(text)
             merge_terms(glossary, data.get("key_terms") or [])
@@ -38,6 +36,10 @@ def translate_body(state: TranslationState) -> dict:
             if verbose:
                 print(f"  translate_body chunk {chunk.id} failed: {exc}")
             chunk.translation = chunk.text  # leave Korean as fallback marker
+
+        # Heartbeat every 10 chunks (and at the end)
+        if i % 10 == 0 or i == total:
+            progress(f"  BODY {i}/{total}")
 
         if delay > 0:
             time.sleep(delay)

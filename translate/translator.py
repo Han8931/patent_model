@@ -31,7 +31,10 @@ class PatentTranslator:
         review: bool = True,
         progress_callback: Callable[[str], None] | None = None,
     ) -> None:
-        progress = progress_callback or (lambda _: None)
+        # Default progress sink: print to stdout. `verbose` controls extra
+        # per-chunk detail separately; the high-level step messages always print
+        # unless the caller passes an explicit no-op callback.
+        progress = progress_callback if progress_callback is not None else print
 
         initial: TranslationState = {
             "input_path": Path(input_path),

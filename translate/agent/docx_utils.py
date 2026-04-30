@@ -11,6 +11,10 @@ from docx.oxml.ns import qn
 _W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 _M = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
 _XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space'
+_HANGUL_RE = re.compile(r'[가-힯]')
+_EQUATION_PLACEHOLDER = '[EQUATION]'
+_EQUATION_TOKEN_RE = re.compile(r'\[EQUATION(?:_\d+)?\]')
+_EQUATION_PLACEHOLDER_RE = re.compile(r'\s*\[EQUATION(?:_\d+)?\]\s*')
 
 
 def has_drawing(para) -> bool:
@@ -19,8 +23,11 @@ def has_drawing(para) -> bool:
 
 
 def has_math(para) -> bool:
-    """True iff the paragraph contains an <m:oMath> equation."""
-    return para._p.find('.//{%s}oMath' % _M) is not None
+    """True iff the paragraph contains an OMML equation."""
+    return (
+        para._p.find('.//{%s}oMath' % _M) is not None
+        or para._p.find('.//{%s}oMathPara' % _M) is not None
+    )
 
 
 def has_non_text_content(para) -> bool:
@@ -33,23 +40,93 @@ def text_runs(para) -> list:
 
 
 def extract_all_text(para) -> str:
-    """Concatenate text from <w:t> AND <m:t> in document order.
+    """Concatenate text from <w:t> and translatable <m:t> in document order.
 
     Korean equation paragraphs often embed Korean labels or 'where ...' clauses
     inside <m:t> elements; para.text only returns <w:t> content and misses them.
+    Formula-only Word equations are exposed as [EQUATION] placeholders instead
+    of raw math symbols so the LLM does not translate or duplicate the formula.
     Use a w:br as a soft separator to mirror Word's visual line breaks.
     """
-    p = para._p
     parts: list[str] = []
-    for el in p.iter():
-        tag = el.tag
-        local = tag.split('}')[-1] if '}' in tag else tag
-        if local == 't':
-            if el.text:
-                parts.append(el.text)
-        elif local == 'br':
-            parts.append('\n')
+    _append_translatable_text(para._p, parts)
     return ''.join(parts)
+
+
+def _local_name(el) -> str:
+    tag = el.tag
+    return tag.split('}')[-1] if '}' in tag else tag
+
+
+def _is_math_element(el) -> bool:
+    return el.tag in (f'{{{_M}}}oMath', f'{{{_M}}}oMathPara')
+
+
+def _element_text(el) -> str:
+    return ''.join(
+        child.text or ''
+        for child in el.iter()
+        if _local_name(child) == 't'
+    )
+
+
+def _append_translatable_text(el, parts: list[str]) -> None:
+    """Append paragraph text while treating each top-level equation as atomic."""
+    if _is_math_element(el):
+        math_text = _element_text(el)
+        if not math_text:
+            return
+        if _HANGUL_RE.search(math_text):
+            parts.append(math_text)
+        else:
+            parts.append(_EQUATION_PLACEHOLDER)
+        return
+
+    local = _local_name(el)
+    if local == 't':
+        if el.text:
+            parts.append(el.text)
+        return
+    if local == 'br':
+        parts.append('\n')
+        return
+
+    for child in el:
+        _append_translatable_text(child, parts)
+
+
+def _top_level_math_elements(para) -> list:
+    elements: list = []
+
+    def visit(el, inside_math: bool = False) -> None:
+        is_math = _is_math_element(el)
+        if is_math and not inside_math:
+            elements.append(el)
+            return
+        for child in el:
+            visit(child, inside_math or is_math)
+
+    visit(para._p)
+    return elements
+
+
+def _remove_korean_math(para) -> None:
+    """Remove equation XML whose own text contains Korean.
+
+    Formula-only equations are preserved. Equations containing Korean are removed
+    after the English translation is written; otherwise Word-equation text stored
+    in <m:t> remains visible because python-docx text runs do not own it.
+    """
+    for el in list(_top_level_math_elements(para)):
+        if not _HANGUL_RE.search(_element_text(el)):
+            continue
+        parent = el.getparent()
+        if parent is not None:
+            parent.remove(el)
+
+
+def _strip_equation_placeholders(text: str) -> str:
+    return _EQUATION_PLACEHOLDER_RE.sub(' ', text).strip()
 
 
 def write_run_with_breaks(run, text: str, font_name: str) -> None:
@@ -73,30 +150,7 @@ def write_run_with_breaks(run, text: str, font_name: str) -> None:
     run.font.name = font_name
 
 
-def replace_text(para, new_text: str, font_name: str) -> None:
-    """Write new_text into the paragraph's text runs, leaving non-text XML untouched.
-
-    If the paragraph has no text runs but DOES have non-text content (e.g. an
-    equation), a new <w:r><w:t>...</w:t></w:r> is inserted at the start so the
-    translation is rendered alongside the equation.
-    """
-    runs = text_runs(para)
-    if not runs:
-        if not new_text:
-            return
-        if has_non_text_content(para):
-            _prepend_text_run(para, new_text, font_name)
-        return
-    write_run_with_breaks(runs[0], new_text, font_name)
-    for run in runs[1:]:
-        run.text = ''
-        run.font.name = font_name
-    for run in para.runs:
-        run.font.name = font_name
-
-
-def _prepend_text_run(para, text: str, font_name: str) -> None:
-    """Insert a new <w:r><w:t>...</w:t></w:r> as the first child of <w:p>."""
+def _build_text_run(text: str, font_name: str):
     new_r = OxmlElement('w:r')
     new_rpr = OxmlElement('w:rPr')
     new_rFonts = OxmlElement('w:rFonts')
@@ -114,6 +168,68 @@ def _prepend_text_run(para, text: str, font_name: str) -> None:
         new_r.append(t)
         if idx < len(parts) - 1:
             new_r.append(OxmlElement('w:br'))
+    return new_r
+
+
+def _replace_text_with_math_placeholders(para, new_text: str, font_name: str) -> bool:
+    formula_math = [
+        el for el in _top_level_math_elements(para)
+        if not _HANGUL_RE.search(_element_text(el))
+    ]
+    if not formula_math or not _EQUATION_TOKEN_RE.search(new_text):
+        return False
+
+    parts = _EQUATION_TOKEN_RE.split(new_text, maxsplit=len(formula_math))
+    if len(parts) < 2:
+        return False
+    while len(parts) < len(formula_math) + 1:
+        parts.append('')
+    parts = [_EQUATION_TOKEN_RE.sub('', part) for part in parts]
+
+    # Clear existing normal text. The equation XML remains in its original spot.
+    for run in para.runs:
+        write_run_with_breaks(run, '', font_name)
+
+    for idx, math_el in enumerate(formula_math):
+        before = parts[idx]
+        if before:
+            math_el.addprevious(_build_text_run(before, font_name))
+
+    after = parts[len(formula_math)]
+    if after:
+        formula_math[-1].addnext(_build_text_run(after, font_name))
+    return True
+
+
+def replace_text(para, new_text: str, font_name: str) -> None:
+    """Write new_text into the paragraph's text runs.
+
+    Formula-only equations are preserved. Equations containing Korean text are
+    removed after their English translation is written; otherwise the original
+    Korean <m:t> text remains visible because python-docx text runs do not own it.
+    """
+    _remove_korean_math(para)
+    if _replace_text_with_math_placeholders(para, new_text, font_name):
+        return
+
+    new_text = _strip_equation_placeholders(new_text)
+    runs = text_runs(para)
+    if not runs:
+        if not new_text:
+            return
+        _prepend_text_run(para, new_text, font_name)
+        return
+    write_run_with_breaks(runs[0], new_text, font_name)
+    for run in runs[1:]:
+        run.text = ''
+        run.font.name = font_name
+    for run in para.runs:
+        run.font.name = font_name
+
+
+def _prepend_text_run(para, text: str, font_name: str) -> None:
+    """Insert a new <w:r><w:t>...</w:t></w:r> as the first child of <w:p>."""
+    new_r = _build_text_run(text, font_name)
 
     # Insert after <w:pPr> if present, otherwise at the start
     p = para._p
