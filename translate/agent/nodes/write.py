@@ -9,11 +9,15 @@ from ..state import Chunk, TranslationState
 
 
 def _apply_chunk(chunk: Chunk, records, font: str) -> None:
-    """Write the chunk's translation into the FIRST paragraph; blank the rest."""
-    if chunk.translation is None:
-        return
+    """Write the chunk's translation into the FIRST paragraph; blank the rest.
+
+    If the translation is empty/missing, leave the original paragraph untouched
+    (rather than blanking it) so the source text remains visible as a flag.
+    """
     if not chunk.paragraph_indices:
         return
+    if not chunk.translation or not chunk.translation.strip():
+        return  # leave Korean visible — better than silent disappearance
 
     head_idx = chunk.paragraph_indices[0]
     head_record = records[head_idx]
@@ -48,11 +52,12 @@ def write(state: TranslationState) -> dict:
     for chunk in state.get("chunks_claims", []):
         _apply_chunk(chunk, indexed_records, font)
 
-    # Abstract word count footer
+    # Abstract word count footer — insert after the LAST paragraph of the abstract
+    # chunk (so the footer appears after the translated body, not in the middle).
     abstract_chunks = state.get("chunks_abstract", [])
     if abstract_chunks and abstract_chunks[0].translation:
         ab = abstract_chunks[0]
-        last_idx = ab.paragraph_indices[0]
+        last_idx = ab.paragraph_indices[-1]
         last_para = indexed_records[last_idx].para
         count = word_count(ab.translation)
         insert_para_after(last_para, f"({count})", font)
