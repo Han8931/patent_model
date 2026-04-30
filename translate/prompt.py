@@ -230,12 +230,25 @@ _REVIEW_SYSTEM = (
 def build_batch_messages(section: str, prompt: "Prompt", items: list[str]) -> list[dict]:
     """Build messages for batch translation of a list of paragraphs."""
     numbered = "\n\n".join(f"[{i}] {text}" for i, text in enumerate(items))
-    extra = ""
+
     if section == "CLAIMS":
         extra = (
             "Do NOT prepend claim numbers (e.g. '1.', 'Claim 1.', 'Claims 1.') "
             "— numbering is handled separately.\n"
+            "Output one translation per input item. Do not merge items.\n"
         )
+    else:
+        extra = (
+            "MERGING RULE: Korean source paragraphs sometimes split a single logical\n"
+            "sentence across multiple items. If adjacent items form one coherent sentence\n"
+            "or thought, merge them:\n"
+            "  - Put the full merged translation in the FIRST item's slot.\n"
+            "  - Output an empty string for every absorbed item.\n"
+            "  - Only merge items that are clearly incomplete on their own\n"
+            "    (dangling clauses, continuation phrases, split lists).\n"
+            "  - Do NOT merge across independent thoughts or section boundaries.\n"
+        )
+
     user_content = (
         "Translate each numbered Korean patent paragraph into English.\n"
         "Return translations in the SAME numbered format [0], [1], [2]…\n"

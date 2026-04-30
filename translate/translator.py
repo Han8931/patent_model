@@ -35,19 +35,21 @@ def _parse_batch_response(text: str, count: int) -> list[str | None]:
     """Parse [N] numbered translation output back into an ordered list.
 
     Splits on [N] markers; content between consecutive markers belongs to
-    the preceding index. Returns None for any index not found in the output.
+    the preceding index.
+    - None  → index not found in output (triggers single-translation fallback)
+    - ""    → LLM intentionally left blank (merged into a prior item; blank the paragraph)
+    - str   → normal translation
     """
     results: list[str | None] = [None] * count
-    # re.split with a capturing group keeps the captured index in the list
     parts = re.split(r'\n?\[(\d+)\]\s*', text.strip())
     # parts = [pre-text, idx, content, idx, content, ...]
     i = 1
     while i + 1 < len(parts):
         try:
             idx = int(parts[i])
-            content = parts[i + 1].strip()
-            if 0 <= idx < count and content:
-                results[idx] = postprocess(content)
+            if 0 <= idx < count:
+                content = parts[i + 1].strip()
+                results[idx] = postprocess(content) if content else ""
         except (ValueError, IndexError):
             pass
         i += 2
@@ -517,9 +519,14 @@ class PatentTranslator:
 
             for r, t in zip(pending, translations):
                 if t is None:
+                    # Parse failure — fall back to single-paragraph translation
                     if verbose:
                         print(f"  Fallback: {r['raw'][:60]}…")
                     t = self._translate_single(r["raw"], prompt)
+                elif t == "":
+                    # LLM merged this paragraph into a prior one — blank it out
+                    _replace_text(r["para"], "", font)
+                    continue
 
                 if section == "CLAIMS":
                     t = _LLM_CLAIM_PREFIX_RE.sub('', t.strip())
