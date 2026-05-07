@@ -153,6 +153,18 @@ PROMPT_BODY = register_prompt(Prompt(
         "- Use consistent noun phrases for components (e.g., 'a substrate', 'a passivation layer').\n"
         "- Preserve all reference numerals exactly (e.g., 100a, GR(1), T1).\n"
         "- Do not add advantages or conclusions unless explicitly stated in the source.\n"
+        "\n"
+        "EQUATIONS INSIDE A BODY PARAGRAPH:\n"
+        "- Each equation is shown as a numbered marker [EQUATION_1], [EQUATION_2], … .\n"
+        "  Keep every marker verbatim and in the SAME order and relative position as the source.\n"
+        "- DO NOT regroup the markers (e.g. '[EQUATION_1] [EQUATION_2] description1 description2' is WRONG).\n"
+        "  Output must alternate marker + its description, marker + its description, just like the source:\n"
+        "    'where the variable satisfies [EQUATION_1], in which A is …, B is … . The system also satisfies\n"
+        "     [EQUATION_2], in which X is …, Y is … .'\n"
+        "- A parameter legend immediately following an equation ('여기서, A는 ..., B는 ...,') describes\n"
+        "  THAT equation only — keep it adjacent to the same marker. Translate every '<symbol>는/은 ...'\n"
+        "  item; do not merge, drop, or summarize.\n"
+        "- The number of [EQUATION_N] tokens you emit MUST equal the number you received.\n"
     ),
 ))
 

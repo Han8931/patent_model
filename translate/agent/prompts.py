@@ -30,6 +30,12 @@ def build_body_messages(chunk_text: str, glossary: dict[str, str]) -> list[dict]
     user = (
         "Translate the following Korean patent text into English (USPTO style).\n"
         "Render the entire text as ONE coherent English paragraph.\n"
+        "- If the source contains [EQUATION_1], [EQUATION_2], … keep each marker verbatim\n"
+        "  and in the SAME order and relative position as the source. Do not regroup them.\n"
+        "- If the source alternates marker + description, marker + description, the translation\n"
+        "  must alternate the SAME way: e.g. '[EQUATION_1] + its description, then [EQUATION_2] +\n"
+        "  its description.' NEVER output '[EQUATION_1] [EQUATION_2] description1 description2'.\n"
+        "- Emit exactly the same number of [EQUATION_N] tokens as the input.\n"
         "Output JSON ONLY in this schema:\n"
         '{"text": "<English translation>", "key_terms": [{"ko": "<Korean term>", "en": "<English term>"}]}\n'
         "key_terms must list significant technical noun phrases you translated (components, materials, processes).\n"
