@@ -12,8 +12,25 @@ move the actual Word equation XML into the translated claim paragraph.
 
 from __future__ import annotations
 
+import re
+
 from ..docx_utils import extract_all_text, has_drawing, has_math
 from ..state import Chunk, TranslationState
+
+
+_EQUATION_TOKEN_RE = re.compile(r'\[EQUATION(?:_\d+)?\]')
+
+
+def _number_equation_placeholders(text: str, next_number: int) -> tuple[str, int]:
+    """Give each equation in a claim a stable marker for order preservation."""
+
+    def repl(_: re.Match) -> str:
+        nonlocal next_number
+        marker = f"[EQUATION_{next_number}]"
+        next_number += 1
+        return marker
+
+    return _EQUATION_TOKEN_RE.sub(repl, text), next_number
 
 
 def chunk_claims(state: TranslationState) -> dict:
@@ -24,9 +41,11 @@ def chunk_claims(state: TranslationState) -> dict:
     current_indices: list[int] = []
     current_text_parts: list[str] = []
     header_index: int | None = None
+    next_equation_number = 1
 
     def flush() -> None:
-        nonlocal current_claim_num, current_indices, current_text_parts, header_index
+        nonlocal current_claim_num, current_indices, current_text_parts
+        nonlocal header_index, next_equation_number
         if current_claim_num is not None and (current_indices or header_index is not None):
             indices: list[int] = []
             if header_index is not None:
@@ -43,6 +62,7 @@ def chunk_claims(state: TranslationState) -> dict:
         current_indices = []
         current_text_parts = []
         header_index = None
+        next_equation_number = 1
 
     in_claims = False
     for r in records:
@@ -71,8 +91,11 @@ def chunk_claims(state: TranslationState) -> dict:
                 current_claim_num = r.claim_num
                 # No standalone header — this paragraph is the head of the claim
                 header_index = None
+            text, next_equation_number = _number_equation_placeholders(
+                r.raw, next_equation_number
+            )
             current_indices.append(r.index)
-            current_text_parts.append(r.raw)
+            current_text_parts.append(text)
             continue
 
         if (
@@ -82,8 +105,11 @@ def chunk_claims(state: TranslationState) -> dict:
             and has_math(r.para)
             and not has_drawing(r.para)
         ):
+            text, next_equation_number = _number_equation_placeholders(
+                extract_all_text(r.para) or "[EQUATION]", next_equation_number
+            )
             current_indices.append(r.index)
-            current_text_parts.append(extract_all_text(r.para) or "[EQUATION]")
+            current_text_parts.append(text)
 
     flush()
     return {"chunks_claims": chunks}
