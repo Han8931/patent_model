@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 from ..prompt import (
+    CLAIM_PROMPT_BY_KIND,
     PROMPT_ABSTRACT,
     PROMPT_BODY,
     PROMPT_CLAIMS,
+    PROMPT_CLAIMS_DEVICE,
     Prompt,
+)
+from .claim_classifier import (
+    ClaimKind,
+    MultiParent,
+    PreambleSpec,
+    build_dependent_preamble,
+    format_parent_reference,
 )
 from .glossary import format_for_prompt
 
@@ -73,45 +82,120 @@ def build_abstract_messages(chunk_text: str, glossary: dict[str, str]) -> list[d
 # Claims — one claim per call, returned as one coherent sentence
 # ---------------------------------------------------------------------------
 
-def build_claim_messages(
-    claim_num: int,
-    chunk_text: str,
-    glossary: dict[str, str],
-    independent_categories: dict[int, str] | None = None,
-) -> list[dict]:
-    system = _system_with_glossary(PROMPT_CLAIMS, glossary)
+_SHARED_CLAIM_RULES = (
+    "- Render the FULL claim as a single sentence.\n"
+    "- Place ';' between elements; insert a newline after each ';' and after each ':'.\n"
+    "- Use lowercase after ':', ';', and 'wherein' (unless a proper noun).\n"
+    "- Do NOT prepend the claim number — numbering is added separately.\n"
+    "- If [EQUATION] or a numbered marker such as [EQUATION_1] appears, keep the marker\n"
+    "  verbatim in the same source order and relative position.\n"
+    "- Preserve equation layout as much as possible. If the source alternates equation +\n"
+    "  description, equation + description, translate in that same alternating order;\n"
+    "  do not move all equations before all descriptions.\n"
+    "- Translate every parameter description that follows an equation (e.g. '여기서, A는 ...,\n"
+    "  B는 ..., C는 ...'). Output one clause per parameter — do not merge, drop, or\n"
+    "  summarize any of them.\n"
+)
 
-    cats_block = ""
-    if independent_categories:
-        lines = "\n".join(f"  claim {n}: {c}" for n, c in independent_categories.items())
-        cats_block = (
-            "\nINDEPENDENT CLAIM CATEGORIES (use the matching <category> for dependent claims):\n"
-            f"{lines}\n"
-        )
 
-    user = (
-        f"Translate Korean claim {claim_num} into ONE coherent English claim sentence.\n"
-        "- Render the FULL claim as a single sentence.\n"
-        "- Place ';' between elements; insert a newline after each ';' and after each ':'.\n"
-        "- Use lowercase after ':', ';', and 'wherein' (unless a proper noun).\n"
-        "- Do NOT prepend the claim number — numbering is added separately.\n"
-        "- If [EQUATION] or a numbered marker such as [EQUATION_1] appears, keep the marker\n"
-        "  verbatim in the same source order and relative position.\n"
-        "- Preserve equation layout as much as possible. If the source alternates equation +\n"
-        "  description, equation + description, translate in that same alternating order;\n"
-        "  do not move all equations before all descriptions.\n"
-        "- Translate every parameter description that follows an equation (e.g. '여기서, A는 ...,\n"
-        "  B는 ..., C는 ...'). Output one clause per parameter — do not merge, drop, or\n"
-        "  summarize any of them.\n"
-        f"{cats_block}"
-        "\n"
+def _independent_user_prompt(claim_num: int, kind: ClaimKind, chunk_text: str) -> str:
+    return (
+        f"Translate Korean claim {claim_num} (INDEPENDENT, kind={kind}) into ONE coherent English claim sentence.\n"
+        "Use the kind-specific PREAMBLE template and ELEMENT GRAMMAR from the system message.\n"
+        + _SHARED_CLAIM_RULES
+        + "\n"
         "Output JSON ONLY:\n"
-        '{"text": "<English claim sentence>", "category": "<method|apparatus|system|device|medium|...>", '
-        '"is_independent": true|false, "key_terms": [{"ko": "...", "en": "..."}]}\n'
+        '{"text": "<English claim sentence>", "key_terms": [{"ko": "...", "en": "..."}]}\n'
         "\n"
         "Korean:\n"
         f"{chunk_text}\n"
     )
+
+
+def _dependent_user_prompt(
+    claim_num: int,
+    kind: ClaimKind,
+    chunk_text: str,
+    parent_spec: PreambleSpec,
+    parent_claim_nums: list[int],
+    multi_parent_kind: MultiParent,
+    method_connective: str,
+) -> str:
+    preamble = build_dependent_preamble(
+        parent_spec, parent_claim_nums, multi_parent_kind
+    )
+    if kind == "method":
+        # 'further comprising' is followed by a gerund step (no comma); 'wherein'
+        # is followed by a refining clause (comma + lowercase clause).
+        if method_connective == "further comprising":
+            opener = f"'{preamble}, further comprising <gerund step> ...'"
+        else:
+            opener = f"'{preamble}, wherein <refining clause about an existing step> ...'"
+    elif kind == "crm":
+        opener = (
+            f"'{preamble}, wherein the instructions further cause "
+            f"the {parent_spec.actor_phrase or 'processor'} to <bare-infinitive> ...' "
+            f"OR '{preamble}, wherein <refining clause> ...'"
+        )
+    else:  # device, system
+        opener = f"'{preamble}, wherein <limitation> ...'"
+
+    return (
+        f"Translate Korean claim {claim_num} (DEPENDENT, kind={kind}, "
+        f"depends on {format_parent_reference(parent_claim_nums, multi_parent_kind)}) "
+        "into ONE coherent English claim sentence.\n"
+        "\n"
+        f"PREAMBLE LOCK — begin the English claim EXACTLY with: {opener}\n"
+        f"  - The phrase '{preamble}' must appear verbatim — do NOT change the noun "
+        "phrase, the claim number, or the dependency style.\n"
+        "  - Do NOT use 'according to claim', 'as claimed in', 'pursuant to', "
+        "or 'in accordance with'.\n"
+        "\n"
+        + _SHARED_CLAIM_RULES
+        + "\n"
+        "Output JSON ONLY:\n"
+        '{"text": "<English claim sentence>", "key_terms": [{"ko": "...", "en": "..."}]}\n'
+        "\n"
+        "Korean:\n"
+        f"{chunk_text}\n"
+    )
+
+
+def build_claim_messages(
+    *,
+    claim_num: int,
+    chunk_text: str,
+    glossary: dict[str, str],
+    kind: ClaimKind = "device",
+    is_independent: bool = True,
+    parent_spec: PreambleSpec | None = None,
+    parent_claim_nums: list[int] | None = None,
+    multi_parent_kind: MultiParent = "single",
+    method_connective: str = "wherein",
+) -> list[dict]:
+    """Build messages for one claim translation call.
+
+    Routes to the per-kind system prompt (device/method/crm/system) and, for
+    dependents, injects a literal preamble prefix derived from the parent
+    independent claim's locked-in noun phrase. This eliminates the entire
+    class of preamble drift bugs (wrong noun phrase, 'according to claim',
+    method dependents using 'wherein' when they should use 'further comprising').
+    """
+    prompt = CLAIM_PROMPT_BY_KIND.get(kind, PROMPT_CLAIMS_DEVICE)
+    system = _system_with_glossary(prompt, glossary)
+
+    if is_independent or parent_spec is None or not parent_claim_nums:
+        user = _independent_user_prompt(claim_num, kind, chunk_text)
+    else:
+        user = _dependent_user_prompt(
+            claim_num=claim_num,
+            kind=kind,
+            chunk_text=chunk_text,
+            parent_spec=parent_spec,
+            parent_claim_nums=parent_claim_nums,
+            multi_parent_kind=multi_parent_kind,
+            method_connective=method_connective,
+        )
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},

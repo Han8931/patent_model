@@ -180,61 +180,151 @@ PROMPT_ABSTRACT = register_prompt(Prompt(
     ),
 ))
 
-PROMPT_CLAIMS = register_prompt(Prompt(
-    name="claims",
-    system=(
-        COMMON_SYSTEM
-        + "\n"
-        "SECTION: CLAIMS\n"
-        "\n"
-        "INDEPENDENT CLAIMS:\n"
-        "- Preamble pattern: 'A <category> comprising:' or 'A <category> performed by <actor>, the <category> comprising:'.\n"
-        "- List elements separated by ';' and '; and' before the last element.\n"
-        "\n"
-        "DEPENDENT CLAIMS — KOREAN PHRASE CONVERSION (CRITICAL):\n"
-        "- Korean dependency phrases and their required English forms:\n"
-        "  * '청구항 <M>에 있어서,' → 'The <category> of claim <M>, wherein ...'\n"
-        "  * '제 <M> 항에 있어서,' → 'The <category> of claim <M>, wherein ...'\n"
-        "  * '청구항 <M>에 따른' → 'The <category> of claim <M>, ...'\n"
-        "  The <category> must match the category of the independent claim it depends on.\n"
-        "\n"
-        "FORBIDDEN PHRASES (ABSOLUTE BAN — never use any of these):\n"
-        "  * 'according to claim'\n"
-        "  * 'as claimed in claim'\n"
-        "  * 'pursuant to claim'\n"
-        "  * 'in accordance with claim'\n"
-        "  The ONLY allowed reference style is: 'The <category> of claim <N>, ...'\n"
-        "\n"
-        "EQUATIONS INSIDE A CLAIM:\n"
-        "- [EQUATION] markers, including numbered markers like [EQUATION_1], stand in for\n"
-        "  Word equations; keep each marker exactly where it appears.\n"
-        "- Preserve the source order and layout around equations. Do not collect all equations\n"
-        "  first and then list all descriptions afterward.\n"
-        "- If the source alternates equation and legend/description, keep the translation in\n"
-        "  that same alternating order, e.g. [EQUATION_1] + its description, then\n"
-        "  [EQUATION_2] + its description.\n"
-        "- A parameter legend usually follows the equation (Korean: '여기서, A는 ..., B는 ...').\n"
-        "  Render it after the equation as: 'where A is ...; B is ...; and C is ...,' — one\n"
-        "  clause per parameter, joined by ';' and a newline (per the FORMATTING rules below).\n"
-        "- Translate EVERY parameter description. The output must contain one clause for each\n"
-        "  '<symbol>는/은 ...' item in the source. Do not merge multiple parameters into one\n"
-        "  clause and do not drop any. If the source lists 5 parameters, output 5 clauses.\n"
-        "\n"
-        "FORMATTING:\n"
-        "- After ':' and after each ';', insert a newline to list elements on separate lines.\n"
-        "- Do NOT capitalize the first word after ':', ';', or 'wherein' unless it is a proper noun.\n"
-        "  Correct:   '... comprising:\\na first die;\\na second die.'\n"
-        "  Incorrect: '... comprising:\\nA first die;\\nA second die.'\n"
-        "- 'wherein' introduces a limitation — the word after 'wherein' must be lowercase.\n"
-        "  Correct:   ', wherein the first groove has a first depth'\n"
-        "  Incorrect: ', wherein The first groove has a first depth'\n"
-        "- Maintain antecedent basis: introduce with 'a/an', refer back with 'the'.\n"
-        "- Use 'wherein' (not 'where') for limitations.\n"
-        "- Keep each claim as one sentence.\n"
-        "- Preserve claim numbers and dependency references exactly.\n"
-        "- Do NOT add or remove limitations.\n"
-    ),
+_CLAIMS_BASE_RULES = (
+    "\n"
+    "SECTION: CLAIMS\n"
+    "\n"
+    "FORBIDDEN PHRASES (ABSOLUTE BAN — never use any of these):\n"
+    "  * 'according to claim'\n"
+    "  * 'as claimed in claim'\n"
+    "  * 'pursuant to claim'\n"
+    "  * 'in accordance with claim'\n"
+    "  The ONLY allowed reference style is: 'The <noun phrase> of claim <N>, ...'\n"
+    "\n"
+    "EQUATIONS INSIDE A CLAIM:\n"
+    "- [EQUATION] markers, including numbered markers like [EQUATION_1], stand in for\n"
+    "  Word equations; keep each marker exactly where it appears.\n"
+    "- Preserve the source order and layout around equations. Do not collect all equations\n"
+    "  first and then list all descriptions afterward.\n"
+    "- If the source alternates equation and legend/description, keep the translation in\n"
+    "  that same alternating order, e.g. [EQUATION_1] + its description, then\n"
+    "  [EQUATION_2] + its description.\n"
+    "- A parameter legend usually follows the equation (Korean: '여기서, A는 ..., B는 ...').\n"
+    "  Render it after the equation as: 'where A is ...; B is ...; and C is ...,' — one\n"
+    "  clause per parameter, joined by ';' and a newline (per the FORMATTING rules below).\n"
+    "- Translate EVERY parameter description. The output must contain one clause for each\n"
+    "  '<symbol>는/은 ...' item in the source. Do not merge multiple parameters into one\n"
+    "  clause and do not drop any. If the source lists 5 parameters, output 5 clauses.\n"
+    "\n"
+    "FORMATTING:\n"
+    "- After ':' and after each ';', insert a newline to list elements on separate lines.\n"
+    "- Do NOT capitalize the first word after ':', ';', or 'wherein' unless it is a proper noun.\n"
+    "  Correct:   '... comprising:\\na first die;\\na second die.'\n"
+    "  Incorrect: '... comprising:\\nA first die;\\nA second die.'\n"
+    "- 'wherein' introduces a limitation — the word after 'wherein' must be lowercase.\n"
+    "  Correct:   ', wherein the first groove has a first depth'\n"
+    "  Incorrect: ', wherein The first groove has a first depth'\n"
+    "- Maintain antecedent basis: introduce with 'a/an', refer back with 'the'.\n"
+    "- Use 'wherein' (not 'where') for limitations.\n"
+    "- Keep each claim as one sentence.\n"
+    "- Preserve claim numbers and dependency references exactly.\n"
+    "- Do NOT add or remove limitations.\n"
+)
+
+
+# ---------------------------------------------------------------------------
+# Per-kind claim sub-prompts.
+# Each appends a kind-specific block to _CLAIMS_BASE_RULES. The differences
+# are: independent preamble template, element grammar (noun phrase vs gerund
+# vs instructions), and the dependent connective ('wherein' vs
+# 'further comprising').
+# ---------------------------------------------------------------------------
+
+_CLAIMS_DEVICE_EXTRA = (
+    "\n"
+    "CLAIM KIND: DEVICE / APPARATUS\n"
+    "INDEPENDENT PREAMBLE: 'A <noun phrase> comprising:' (e.g., 'A semiconductor device comprising:').\n"
+    "ELEMENT GRAMMAR: each element is a NOUN PHRASE introduced with 'a/an',\n"
+    "  e.g., 'a first die;', 'a substrate;', 'a gate electrode disposed on the substrate;'.\n"
+    "  Do NOT use gerund (-ing) verb forms — those are for method claims only.\n"
+    "DEPENDENT PREAMBLE: 'The <noun phrase> of claim <N>, wherein ...'.\n"
+    "  Use 'wherein' to introduce limitations on existing elements.\n"
+)
+
+_CLAIMS_METHOD_EXTRA = (
+    "\n"
+    "CLAIM KIND: METHOD / PROCESS\n"
+    "INDEPENDENT PREAMBLE:\n"
+    "  - 'A method comprising:' (when no object is specified), or\n"
+    "  - 'A method of <gerund object>, the method comprising:'\n"
+    "    (e.g., 'A method of manufacturing a semiconductor device, the method comprising:').\n"
+    "ELEMENT GRAMMAR: each step is a GERUND ('-ing' verb form), not a noun phrase:\n"
+    "  e.g., 'forming a first layer on a substrate;', 'etching a portion of the first layer;'.\n"
+    "  Korean steps end with the verb ('~하는 단계;'). Invert so the verb (gerund) comes first\n"
+    "  and the objects/locations follow, in English order.\n"
+    "DEPENDENT PREAMBLE — pick the right connective:\n"
+    "  - 'The method of claim <N>, wherein ...'  → when refining an existing step\n"
+    "    (Korean: '상기 ~ 단계는, ...').\n"
+    "  - 'The method of claim <N>, further comprising <gerund> ...' → when adding a NEW step\n"
+    "    (Korean: '~ 단계를 더 포함하는' / '더 포함하는 ~ 단계').\n"
+    "  Use 'further comprising' ONLY for added steps. Use 'wherein' to qualify existing steps.\n"
+)
+
+_CLAIMS_CRM_EXTRA = (
+    "\n"
+    "CLAIM KIND: NON-TRANSITORY COMPUTER-READABLE MEDIUM (CRM)\n"
+    "INDEPENDENT PREAMBLE:\n"
+    "  'A non-transitory computer-readable medium storing instructions that, when executed by\n"
+    "   <actor>, cause the <actor> to:'\n"
+    "  where <actor> is typically 'a processor', 'a system', 'one or more processors', etc.,\n"
+    "  taken from the source. Reuse the SAME actor noun phrase in every dependent.\n"
+    "ELEMENT GRAMMAR: each step is a bare-infinitive verb, e.g., 'receive a request;',\n"
+    "  'process the request;', 'transmit the result;'. Each step is a thing the actor does.\n"
+    "DEPENDENT PREAMBLE:\n"
+    "  - 'The non-transitory computer-readable medium of claim <N>, wherein ...' (refines).\n"
+    "  - 'The non-transitory computer-readable medium of claim <N>, wherein the instructions\n"
+    "     further cause the <actor> to <bare-infinitive> ...' (adds a new instruction step).\n"
+)
+
+_CLAIMS_SYSTEM_EXTRA = (
+    "\n"
+    "CLAIM KIND: SYSTEM\n"
+    "INDEPENDENT PREAMBLE:\n"
+    "  - Plain: 'A system comprising:' followed by structural elements (device-style).\n"
+    "  - Processor + memory pattern (very common):\n"
+    "    'A system comprising:\\n"
+    "       a processor; and\\n"
+    "       a memory storing instructions that, when executed by the processor, cause the\n"
+    "       processor to:\\n"
+    "         <bare-infinitive step>;\\n"
+    "         <bare-infinitive step>; ...'\n"
+    "  Reuse the SAME actor noun phrase ('the processor', 'the system') in every dependent.\n"
+    "ELEMENT GRAMMAR: structural elements are noun phrases; instruction steps are\n"
+    "  bare-infinitive verbs. Korean '~하도록 구성된' → 'configured to <bare-infinitive>'.\n"
+    "DEPENDENT PREAMBLE: 'The system of claim <N>, wherein ...'.\n"
+)
+
+
+PROMPT_CLAIMS_DEVICE = register_prompt(Prompt(
+    name="claims_device",
+    system=COMMON_SYSTEM + _CLAIMS_BASE_RULES + _CLAIMS_DEVICE_EXTRA,
 ))
+PROMPT_CLAIMS_METHOD = register_prompt(Prompt(
+    name="claims_method",
+    system=COMMON_SYSTEM + _CLAIMS_BASE_RULES + _CLAIMS_METHOD_EXTRA,
+))
+PROMPT_CLAIMS_CRM = register_prompt(Prompt(
+    name="claims_crm",
+    system=COMMON_SYSTEM + _CLAIMS_BASE_RULES + _CLAIMS_CRM_EXTRA,
+))
+PROMPT_CLAIMS_SYSTEM = register_prompt(Prompt(
+    name="claims_system",
+    system=COMMON_SYSTEM + _CLAIMS_BASE_RULES + _CLAIMS_SYSTEM_EXTRA,
+))
+
+
+# Backwards-compatible default — used only as a fallback when the classifier
+# can't determine kind. Routing tables and external callers that still
+# reference PROMPT_CLAIMS will get device-style behavior.
+PROMPT_CLAIMS = PROMPT_CLAIMS_DEVICE
+
+
+CLAIM_PROMPT_BY_KIND: Dict[str, Prompt] = {
+    "device": PROMPT_CLAIMS_DEVICE,
+    "method": PROMPT_CLAIMS_METHOD,
+    "crm":    PROMPT_CLAIMS_CRM,
+    "system": PROMPT_CLAIMS_SYSTEM,
+}
 
 # Section name → prompt routing table
 SECTION_PROMPTS: Dict[str, Prompt] = {

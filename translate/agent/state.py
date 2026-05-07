@@ -25,6 +25,10 @@ class ParagraphRecord:
     mixed: bool = False            # text + image/equation in same paragraph
 
 
+ClaimKind = Literal["device", "method", "crm", "system"]
+MultiParent = Literal["single", "or", "range"]
+
+
 @dataclass
 class Chunk:
     """A unit of text sent to the LLM. May span multiple paragraphs."""
@@ -35,6 +39,16 @@ class Chunk:
     text: str                      # joined Korean text
     claim_num: int | None = None
     translation: str | None = None  # filled by translate_* nodes
+
+    # Claim-specific structural fields, populated for kind == "claim".
+    # Filled by chunk_claims via the deterministic claim_classifier.
+    claim_kind: ClaimKind | None = None
+    is_independent: bool | None = None
+    parent_claim_nums: list[int] = field(default_factory=list)
+    multi_parent_kind: MultiParent = "single"
+    # Filled after the LLM translates the parent independent claim;
+    # consumed when its dependents are translated in phase 2.
+    noun_phrase: str | None = None
 
 
 class TranslationState(TypedDict, total=False):
