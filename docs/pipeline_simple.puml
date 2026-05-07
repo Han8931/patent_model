@@ -1,0 +1,37 @@
+@startuml pipeline_simple
+title Patent Translation Pipeline — Simple View
+
+left to right direction
+
+skinparam DefaultFontName "Helvetica"
+skinparam DefaultFontSize 13
+skinparam shadowing false
+skinparam roundCorner 8
+skinparam ranksep 18
+skinparam nodesep 10
+skinparam ArrowColor #555
+skinparam state {
+  BackgroundColor #FAFAFA
+  BorderColor #888
+  FontStyle bold
+}
+
+state "Load\n//open docx//"           as L  #EAF7EA
+state "Classify\n//tag paragraphs//"   as C  #EAF7EA
+state "Body\n//chunk + translate//"    as B  #FDF6E3
+state "Abstract\n//chunk + translate//"  as A  #EAF1F8
+state "Claims\n//classify → 2-stage translate//"  as CL #FCEAEA
+state "Write\n//apply, preserve equations//"  as W  #EFEFFF
+
+[*] --> L
+L  --> C
+C  --> B
+B  --> A
+A  --> CL
+CL --> W
+W  --> [*]
+
+note bottom of B  : optional review pass
+note bottom of A  : optional review pass
+note bottom of CL : optional review pass
+@enduml

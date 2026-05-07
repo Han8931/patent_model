@@ -1,0 +1,76 @@
+@startuml pipeline
+title Patent Translation Pipeline
+
+skinparam DefaultFontName "Helvetica"
+skinparam DefaultFontSize 12
+skinparam shadowing false
+skinparam roundCorner 6
+skinparam ranksep 12
+skinparam nodesep 8
+skinparam ArrowColor #555
+skinparam activity {
+  BackgroundColor #FAFAFA
+  BorderColor #888
+  DiamondBackgroundColor #FFF7DD
+  DiamondBorderColor #C49A00
+}
+skinparam partition {
+  BackgroundColor #F5F5FA
+  BorderColor #AAA
+  FontStyle bold
+}
+
+start
+
+partition "  Setup  " #EAF7EA {
+  :**load** — open docx;
+  :**classify** — tag every paragraph
+  (text / image / header / claim_header);
+  :**apply_static** — header rewrites
+  (e.g. [발명의 명칭] → TITLE OF INVENTION);
+}
+
+partition "  Body  " #FDF6E3 {
+  :**chunk_body** — greedy-join on trailing : / ,
+  mixed paragraphs are singletons
+  renumber [EQUATION] → [EQUATION_1..N];
+  :**translate_body** — one LLM call per chunk
+  inject rolling glossary, postprocess;
+  if (review?) then (yes)
+    :review_decide → review_revise;
+  else (no)
+  endif
+}
+
+partition "  Abstract  " #EAF1F8 {
+  :**chunk_abstract** — single chunk, drop [요약];
+  :**translate_abstract**;
+  if (review?) then (yes)
+    :review_decide → review_revise;
+  else (no)
+  endif
+}
+
+partition "  Claims  " #FCEAEA {
+  :**chunk_claims** — group by claim header
+  number EQUATIONs, classify each claim
+  (kind, is_independent, parents);
+  :**translate_claims** — TWO STAGES
+  phase 1: independents in claim-num order
+    → lock noun_phrase / actor_phrase
+  phase 2: dependents in source order
+    → inject parent's PreambleSpec;
+  if (review?) then (yes)
+    :review_decide → review_revise;
+  else (no)
+  endif
+}
+
+partition "  Output  " #EFEFFF {
+  :**write** — apply translations into head paragraphs
+  distribute around [EQUATION_N], preserve <m:oMath>;
+  :save output docx;
+}
+
+stop
+@enduml
