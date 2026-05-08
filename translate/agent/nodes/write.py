@@ -62,6 +62,24 @@ def _immediate_next_text_paragraph_index(
     return nxt
 
 
+def _legend_reference_para(chunk: Chunk, records, equation_set: set[int]):
+    """Return the paragraph object that should serve as a formatting template
+    for inserted description paragraphs.
+
+    Heuristic: the LAST non-equation, non-image text paragraph in the chunk
+    after the equations — i.e. the original "여기서, …" legend paragraph.
+    Inserted descriptions inherit its <w:pPr> so they sit alongside centered
+    equations without inheriting the equations' centered alignment.
+    """
+    for idx in reversed(chunk.paragraph_indices[1:]):
+        if idx in equation_set:
+            continue
+        if has_non_text_content(records[idx].para):
+            continue
+        return records[idx].para
+    return None
+
+
 def _apply_claim_with_equations(chunk: Chunk, records, font: str) -> bool:
     """Apply a translated claim while preserving equation paragraph alignment."""
     equation_indices = _claim_equation_indices(chunk, records)
@@ -89,6 +107,8 @@ def _apply_claim_with_equations(chunk: Chunk, records, font: str) -> bool:
         replace_text(records[eq_idx].para, "", font)
 
     equation_set = set(equation_indices)
+    legend_format = _legend_reference_para(chunk, records, equation_set)
+
     for pos, eq_idx in enumerate(equation_indices, start=1):
         segment = _EQUATION_TOKEN_RE.sub("", parts[pos]).strip()
         if not segment:
@@ -98,7 +118,10 @@ def _apply_claim_with_equations(chunk: Chunk, records, font: str) -> bool:
             chunk, records, eq_idx, used_text_indices, equation_set
         )
         if target_idx is None:
-            insert_para_after(records[eq_idx].para, segment, font)
+            insert_para_after(
+                records[eq_idx].para, segment, font,
+                format_ref_para=legend_format,
+            )
             continue
 
         replace_text(records[target_idx].para, segment, font)

@@ -54,15 +54,23 @@ def _add_equation_paragraph(doc, *tokens: str):
 
 
 def make_input_docx(path: Path) -> None:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
     doc = Document()
     doc.add_paragraph("[청구범위]")
     doc.add_paragraph("[청구항 1]")
     doc.add_paragraph(
         "반도체 장치로서, 다음 식들을 만족하는 반도체 장치:"
     )
-    _add_equation_paragraph(doc, "A", " = ", "B", " + ", "C")
-    _add_equation_paragraph(doc, "X", " = ", "Y", " × ", "Z")
-    _add_equation_paragraph(doc, "M", " = ", "N", " - ", "P")
+    # Centered equation paragraphs — mirrors how Word stores [수학식 N].
+    for eq_tokens in [
+        ("A", " = ", "B", " + ", "C"),
+        ("X", " = ", "Y", " × ", "Z"),
+        ("M", " = ", "N", " - ", "P"),
+    ]:
+        p = _add_equation_paragraph(doc, *eq_tokens)
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    # Legend paragraph — left-aligned by default.
     doc.add_paragraph(
         "여기서, A는 두께이고, B는 폭이고, C는 높이이고, "
         "X는 길이이고, Y는 면적이고, Z는 밀도이고, "
@@ -93,6 +101,16 @@ class StubClient:
         return json.dumps({"text": GOOD_CLAIM, "key_terms": []})
 
 
+def _alignment_of(p) -> str:
+    pPr = p._p.find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pPr")
+    if pPr is None:
+        return "default"
+    jc = pPr.find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}jc")
+    if jc is None:
+        return "default"
+    return jc.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val") or "default"
+
+
 def inspect(path: Path) -> None:
     doc = Document(path)
     print(f"\n=== Output paragraphs of {path.name} ===")
@@ -104,7 +122,7 @@ def inspect(path: Path) -> None:
                 seq.append("<EQ>")
             elif tag == "t" and el.text:
                 seq.append(repr(el.text))
-        print(f"[{i}] {' | '.join(seq) if seq else '(blank)'}")
+        print(f"[{i}] align={_alignment_of(p):<7s} {' | '.join(seq) if seq else '(blank)'}")
 
 
 def main() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -269,8 +270,28 @@ def _prepend_text_run(para, text: str, font_name: str) -> None:
         p.insert(0, new_r)
 
 
-def insert_para_after(ref_para, text: str, font_name: str) -> None:
+def insert_para_after(
+    ref_para,
+    text: str,
+    font_name: str,
+    *,
+    format_ref_para=None,
+) -> None:
+    """Insert a new paragraph immediately after ``ref_para``.
+
+    If ``format_ref_para`` is given, clone its <w:pPr> onto the new paragraph
+    so the inserted paragraph inherits alignment, indentation, spacing, and
+    style. This matters when the new paragraph sits between centered equation
+    paragraphs and a left-aligned legend — without a format reference, the
+    new paragraph uses Word defaults and visually clashes.
+    """
     new_p = OxmlElement('w:p')
+
+    if format_ref_para is not None:
+        ref_pPr = format_ref_para._p.find(qn('w:pPr'))
+        if ref_pPr is not None:
+            new_p.append(deepcopy(ref_pPr))
+
     new_r = OxmlElement('w:r')
     new_rpr = OxmlElement('w:rPr')
     new_rFonts = OxmlElement('w:rFonts')
@@ -325,8 +346,67 @@ def _break_after_semicolons(text: str) -> str:
     return re.sub(r';\s+', ';\n', text)
 
 
+# ---------------------------------------------------------------------------
+# 'respectively' expansion
+# ---------------------------------------------------------------------------
+# Defense-in-depth for the parameter-legend layout. The prompt already tells
+# the LLM not to collapse parameters into 'A, B, C are X, Y, Z, respectively',
+# but if it slips through we rewrite into per-parameter clauses joined by ';'.
+#
+# Conservative on purpose: we only fire when
+#   - the symbol list is clearly math-like (short identifiers / Greek letters),
+#   - each value is a simple noun phrase with no internal commas or semicolons,
+#   - the symbol count and value count match,
+#   - the trailing word is the literal 'respectively' (with optional comma).
+# Anything fancier is left alone — better to skip a repair than to mangle text.
+
+# Identifier shape: 1–10 chars, starts with a letter (ASCII or Greek), allows
+# digits, subscripts, primes, underscores. Subscript characters U+2080..U+2089.
+_SYM = r'[A-Za-zΑ-Ωα-ω][A-Za-z0-9Α-Ωα-ω₀-₉_\']{0,9}'
+_VAL = r"[^,;.]+"
+
+_RESPECTIVELY_RE = re.compile(
+    rf'(?P<symbols>{_SYM}'
+    rf'(?:\s*,\s*{_SYM}){{1,8}}'
+    rf'(?:\s*,?\s*and\s+{_SYM})?)'
+    r'\s+(?P<verb>are|denote|represent|stand\s+for|indicate)\s+'
+    rf'(?P<values>{_VAL}'
+    rf'(?:\s*,\s*{_VAL}){{1,8}}'
+    rf'(?:\s*,?\s*and\s+{_VAL})?)'
+    r'\s*,?\s*respectively',
+)
+
+_VERB_SINGULAR = {
+    "are": "is",
+    "denote": "denotes",
+    "represent": "represents",
+    "stand for": "stands for",
+    "indicate": "indicates",
+}
+
+
+def _split_list(text: str) -> list[str]:
+    parts = re.split(r'\s*,\s*and\s+|\s+and\s+|\s*,\s*', text.strip())
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _expand_respectively(text: str) -> str:
+    def repl(m: re.Match) -> str:
+        symbols = _split_list(m.group("symbols"))
+        values = _split_list(m.group("values"))
+        if len(symbols) != len(values) or len(symbols) < 2:
+            return m.group(0)
+        verb = re.sub(r'\s+', ' ', m.group("verb").lower())
+        singular = _VERB_SINGULAR.get(verb, verb)
+        clauses = [f"{s} {singular} {v}" for s, v in zip(symbols, values)]
+        return "; ".join(clauses)
+
+    return _RESPECTIVELY_RE.sub(repl, text)
+
+
 def postprocess(text: str) -> str:
     text = _normalize_unicode(text)
+    text = _expand_respectively(text)
     text = _break_sentences(text)
     text = _break_after_semicolons(text)
     return text
