@@ -8,6 +8,7 @@ from copy import deepcopy
 
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.text.paragraph import Paragraph
 
 
 _W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
@@ -17,6 +18,28 @@ _HANGUL_RE = re.compile(r'[가-힯]')
 _EQUATION_PLACEHOLDER = '[EQUATION]'
 _EQUATION_TOKEN_RE = re.compile(r'\[EQUATION(?:_\d+)?\]')
 _EQUATION_PLACEHOLDER_RE = re.compile(r'\s*\[EQUATION(?:_\d+)?\]\s*')
+
+
+def iter_all_paragraphs(doc):
+    """Yield every <w:p> in document body in source order, INCLUDING those
+    nested inside tables (and tables-in-tables).
+
+    python-docx's ``doc.paragraphs`` only returns paragraphs that are direct
+    children of <w:body>; content placed inside a <w:tbl> is invisible to it.
+    Many patent templates wrap the entire description / claims / abstract in
+    a single root-level table — for those documents ``doc.paragraphs`` returns
+    almost nothing and translation finishes in milliseconds with the source
+    text untouched. This iterator walks the body subtree so the classifier
+    sees every paragraph regardless of container.
+
+    The yielded objects are real ``docx.text.paragraph.Paragraph`` instances,
+    so existing helpers (``replace_text``, ``insert_para_after``, run access)
+    work on them unchanged.
+    """
+    body = doc.element.body
+    P_TAG = f'{{{_W}}}p'
+    for p_el in body.iter(P_TAG):
+        yield Paragraph(p_el, body)
 
 
 def has_drawing(para) -> bool:

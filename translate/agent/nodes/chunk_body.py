@@ -7,6 +7,11 @@ Boundary rules:
     the equation in the wrong location.
   - Index gaps (e.g. a pure-equation paragraph sitting between two text records) also
     break the merge — only consecutive paragraph indices are eligible to join.
+  - Hard SIZE CAP: stop merging once the cumulative chunk text exceeds
+    ``_CHUNK_MAX_CHARS``. Some patents have every paragraph ending in ',' which
+    would otherwise collapse the entire BODY into a single multi-thousand-char
+    chunk that overflows the LLM's output token limit and silently falls back
+    to Korean.
 
 Each chunk's equation placeholders are renumbered to [EQUATION_1], [EQUATION_2], ...
 so the LLM can preserve relative order and the write node can split the translation
@@ -24,6 +29,13 @@ from ..state import Chunk, TranslationState
 
 _CONTINUATION_TAILS = (":", ",")
 _EQUATION_TOKEN_RE = re.compile(r'\[EQUATION(?:_\d+)?\]')
+
+# Approximate per-chunk character budget. Korean output ≈ 1 char per token, so
+# ~1800 chars leaves headroom for the LLM's English answer plus its system+user
+# prompt overhead within a typical 4–8k token context window. Patent paragraphs
+# are usually 100–500 chars, so this still allows 4–18 paragraphs per chunk in
+# the common case while preventing pathological merges.
+_CHUNK_MAX_CHARS = 1800
 
 
 def _is_continuation(text: str) -> bool:
@@ -60,6 +72,7 @@ def _add_equation_context(
 
 def chunk_body(state: TranslationState) -> dict:
     records = state["records"]
+    progress = state.get("progress") or (lambda _: None)
     chunks: list[Chunk] = []
 
     body_records = [
@@ -73,6 +86,7 @@ def chunk_body(state: TranslationState) -> dict:
     while i < len(body_records):
         head = body_records[i]
         group = [head]
+        cumulative_chars = len(head.raw)
 
         # Mixed paragraphs (text + equation) are singleton chunks — never merge into them
         # or out of them.
@@ -92,7 +106,11 @@ def chunk_body(state: TranslationState) -> dict:
                 # Continue only if the previous paragraph clearly didn't finish
                 if not _is_continuation(tail.raw):
                     break
+                # Hard size cap — see _CHUNK_MAX_CHARS comment above.
+                if cumulative_chars + len(nxt.raw) > _CHUNK_MAX_CHARS:
+                    break
                 group.append(nxt)
+                cumulative_chars += len(nxt.raw)
 
         next_eq = 1
         numbered_parts: list[str] = []
@@ -120,4 +138,10 @@ def chunk_body(state: TranslationState) -> dict:
         chunk_idx += 1
         i += len(group)
 
+    if chunks:
+        max_chars = max(len(c.text) for c in chunks)
+        progress(
+            f"BODY: {len(chunks)} chunk(s) from {len(body_records)} paragraphs "
+            f"(largest: {max_chars} chars)"
+        )
     return {"chunks_body": chunks}

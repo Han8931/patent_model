@@ -9,6 +9,7 @@ from ..docx_utils import (
     has_drawing,
     has_math,
     has_non_text_content,
+    iter_all_paragraphs,
 )
 from ..sections import (
     BLANK_RE,
@@ -35,7 +36,7 @@ def classify(state: TranslationState) -> dict:
     records: list[ParagraphRecord] = []
     current_section: str | None = None
 
-    for idx, para in enumerate(doc.paragraphs):
+    for idx, para in enumerate(iter_all_paragraphs(doc)):
         # Pull text from <w:t> AND <m:t> so equation-embedded Korean is visible.
         raw = extract_all_text(para)
         stripped = raw.strip()
