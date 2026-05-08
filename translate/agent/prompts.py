@@ -17,7 +17,9 @@ from .claim_classifier import (
     MultiParent,
     PreambleSpec,
     build_dependent_preamble,
+    extract_korean_subject_phrase,
     format_parent_reference,
+    korean_subject_to_english,
 )
 from .glossary import format_for_prompt
 
@@ -205,6 +207,36 @@ _SHARED_CLAIM_RULES = (
 )
 
 
+def _subject_hint_block(chunk_text: str, kind: ClaimKind) -> str:
+    """Pull the trailing Korean subject ('…을 포함하는 X') and tell the LLM
+    what English noun phrase to use in the preamble. Empty string when no
+    hint can be derived or the kind doesn't take a noun-phrase preamble.
+    """
+    if kind != "device":
+        return ""
+    ko_subject = extract_korean_subject_phrase(chunk_text)
+    if not ko_subject:
+        return ""
+    en_hint = korean_subject_to_english(chunk_text)
+    if en_hint:
+        return (
+            "\n"
+            f"PREAMBLE NOUN PHRASE — use this exact English phrase: '{en_hint}'.\n"
+            f"  (Derived from the trailing Korean subject '{ko_subject}'.)\n"
+            "  Independent: 'A " + en_hint + " comprising:'\n"
+            "  Dependents will say 'The " + en_hint + " of claim N, wherein …'.\n"
+            "  Do NOT use the word 'apparatus'.\n"
+        )
+    # No deterministic translation — still ban 'apparatus' and tell the LLM to
+    # translate the Korean subject phrase carefully.
+    return (
+        "\n"
+        f"PREAMBLE SUBJECT — translate this Korean noun phrase faithfully and\n"
+        f"  use it as the preamble noun: '{ko_subject}'. Do NOT use the generic\n"
+        "  word 'apparatus'.\n"
+    )
+
+
 def _independent_user_prompt(
     claim_num: int,
     kind: ClaimKind,
@@ -219,6 +251,7 @@ def _independent_user_prompt(
         f"Translate Korean claim {claim_num} (INDEPENDENT, kind={kind}) into ONE coherent English claim sentence.\n"
         "Use the kind-specific PREAMBLE template and ELEMENT GRAMMAR from the system message.\n"
         + _SHARED_CLAIM_RULES
+        + _subject_hint_block(chunk_text, kind)
         + layout_repair
         + _format_equation_context(equation_context)
         + "\n"

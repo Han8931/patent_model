@@ -116,7 +116,11 @@ def translate_claims(state: TranslationState) -> dict:
             body = re.sub(
                 rf'^{chunk.claim_num}\.\s*', '', chunk.translation, count=1
             )
-            noun, actor = extract_preamble(body, chunk.claim_kind or "device")
+            noun, actor = extract_preamble(
+                body,
+                chunk.claim_kind or "device",
+                korean_source=chunk.text,
+            )
             chunk.noun_phrase = noun
             preamble_specs[chunk.claim_num] = PreambleSpec(
                 claim_num=chunk.claim_num,

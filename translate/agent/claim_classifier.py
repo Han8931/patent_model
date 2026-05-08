@@ -76,6 +76,77 @@ _TRAILING_NOUN_RE = re.compile(
     r'(?:을|를)\s*포함하는\s*([^\.。\n]+?)\s*[\.。]?\s*$'
 )
 
+
+# Korean → English fallback for the device-claim subject. Used when the LLM's
+# English translation didn't yield a clean noun phrase to extract. We prefer
+# the trailing Korean noun *from the source* over generic words like
+# 'apparatus' so dependents say e.g. 'The semiconductor device of claim 1'
+# instead of 'The apparatus of claim 1'.
+_KOREAN_TO_ENGLISH_NOUN: dict[str, str] = {
+    "반도체 장치":    "semiconductor device",
+    "반도체장치":     "semiconductor device",
+    "반도체 패키지":  "semiconductor package",
+    "반도체패키지":   "semiconductor package",
+    "메모리 장치":   "memory device",
+    "메모리장치":    "memory device",
+    "표시 장치":     "display device",
+    "표시장치":      "display device",
+    "디스플레이 장치": "display device",
+    "디스플레이장치":  "display device",
+    "발광 장치":     "light-emitting device",
+    "발광장치":      "light-emitting device",
+    "전자 장치":     "electronic device",
+    "전자장치":      "electronic device",
+    "디바이스":      "device",
+    "장치":          "device",  # generic 장치 → 'device' (NOT 'apparatus')
+    "회로":          "circuit",
+    "모듈":          "module",
+    "어셈블리":      "assembly",
+    "기판":          "substrate",
+    "패키지":        "package",
+    "소자":          "element",
+}
+
+
+def extract_korean_subject_phrase(claim_text: str) -> str | None:
+    """Return the Korean trailing-subject noun phrase, or None.
+
+    Pattern: '...을/를 포함하는 [수식어들] X' where X is the subject. The match
+    captures everything between '포함하는' and the trailing period, which we
+    normalize (collapse whitespace, strip 'comprising'-noise) before returning.
+    """
+    m = _TRAILING_NOUN_RE.search(claim_text)
+    if not m:
+        return None
+    phrase = re.sub(r'\s+', ' ', m.group(1)).strip()
+    # Drop a trailing copula '인' / '인,' that sometimes appears in dep-claim text.
+    phrase = re.sub(r'(?:인,?|이고,?|이며,?)$', '', phrase).strip()
+    return phrase or None
+
+
+def korean_subject_to_english(claim_text: str) -> str | None:
+    """Translate the trailing-subject Korean phrase to English using the
+    deterministic fallback dictionary. Returns None when no entry matches.
+    Used as a noun-phrase fallback when the LLM's English translation didn't
+    yield a clean noun phrase.
+    """
+    phrase = extract_korean_subject_phrase(claim_text)
+    if phrase is None:
+        return None
+    if phrase in _KOREAN_TO_ENGLISH_NOUN:
+        return _KOREAN_TO_ENGLISH_NOUN[phrase]
+    # Try matching the LAST 1–3 tokens (the head noun is usually the last word)
+    # against the dictionary. e.g. '제2 반도체 장치' → '반도체 장치' → 'semiconductor device'.
+    tokens = phrase.split()
+    for window in range(min(3, len(tokens)), 0, -1):
+        suffix = " ".join(tokens[-window:])
+        if suffix in _KOREAN_TO_ENGLISH_NOUN:
+            return _KOREAN_TO_ENGLISH_NOUN[suffix]
+        suffix_no_space = "".join(tokens[-window:])
+        if suffix_no_space in _KOREAN_TO_ENGLISH_NOUN:
+            return _KOREAN_TO_ENGLISH_NOUN[suffix_no_space]
+    return None
+
 _CRM_PAT = re.compile(
     r'(?:비\s*일시적\s*)?(?:컴퓨터(?:로)?\s*판독\s*가능(?:한|하게)?\s*)?'
     r'(?:기록|저장)\s*매체|'
@@ -186,11 +257,19 @@ _SYSTEM_ACTOR_RE = re.compile(
 )
 
 
-def extract_preamble(translation: str, kind: ClaimKind) -> tuple[str, str | None]:
+def extract_preamble(
+    translation: str,
+    kind: ClaimKind,
+    *,
+    korean_source: str | None = None,
+) -> tuple[str, str | None]:
     """Return (noun_phrase, actor_phrase) extracted from the LLM's English output.
 
-    Falls back to safe defaults so dependent claims still produce a valid
-    preamble even if the independent translation drifted.
+    For device claims, when the English translation doesn't expose a clean
+    'A <noun phrase> comprising:' shape, fall back to translating the trailing
+    Korean subject ('…을 포함하는 X') via the deterministic dictionary instead
+    of the generic word 'apparatus'. This keeps every dependent claim's
+    preamble specific (e.g. 'The semiconductor device of claim 1').
     """
     text = translation.strip()
     if kind == "method":
@@ -211,8 +290,22 @@ def extract_preamble(translation: str, kind: ClaimKind) -> tuple[str, str | None
         return noun, actor
     # device
     m = _DEVICE_NOUN_RE.search(text)
-    noun = m.group(1).strip() if m else "apparatus"
-    return noun, None
+    if m:
+        noun = m.group(1).strip()
+        # Even when the regex matches, reject 'apparatus' as a noun phrase —
+        # it leaks through when the LLM defaults to it. Prefer the Korean
+        # source noun if available.
+        if noun.strip().lower() == "apparatus" and korean_source:
+            korean_noun = korean_subject_to_english(korean_source)
+            if korean_noun:
+                return korean_noun, None
+        return noun, None
+    # No 'A … comprising' shape in the English output — derive from Korean.
+    if korean_source:
+        korean_noun = korean_subject_to_english(korean_source)
+        if korean_noun:
+            return korean_noun, None
+    return "device", None
 
 
 # ---------------------------------------------------------------------------
