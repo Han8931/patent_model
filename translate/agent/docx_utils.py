@@ -95,8 +95,19 @@ def _element_text(el) -> str:
     )
 
 
-def _append_translatable_text(el, parts: list[str]) -> None:
-    """Append paragraph text while treating each top-level equation as atomic."""
+def _append_translatable_text(el, parts: list[str], state: dict | None = None) -> None:
+    """Append paragraph text while treating each top-level equation as atomic.
+
+    ``state`` carries 'in_field' across the recursion. When a w:fldChar with
+    type='begin' is encountered, in_field flips to True and stays True (so we
+    skip both the field's instruction text AND the cached display value)
+    until the matching w:fldChar with type='end'. Without this, SEQ fields
+    used for auto-numbering ('[0001]') leak their display value into the
+    chunk text and the LLM sees pseudo-IDs glued to real content.
+    """
+    if state is None:
+        state = {"in_field": 0}
+
     if _is_math_element(el):
         math_text = _element_text(el)
         if not math_text:
@@ -108,8 +119,19 @@ def _append_translatable_text(el, parts: list[str]) -> None:
         return
 
     local = _local_name(el)
+    if local == 'fldChar':
+        # w:fldChar attribute is in the WordprocessingML namespace.
+        ftype = el.get(qn('w:fldCharType'))
+        if ftype == 'begin':
+            state["in_field"] += 1
+        elif ftype == 'end' and state["in_field"] > 0:
+            state["in_field"] -= 1
+        return
+    if local == 'instrText':
+        # Field instruction text — never visible content.
+        return
     if local == 't':
-        if el.text:
+        if el.text and state["in_field"] == 0:
             parts.append(el.text)
         return
     if local == 'br':
@@ -117,7 +139,7 @@ def _append_translatable_text(el, parts: list[str]) -> None:
         return
 
     for child in el:
-        _append_translatable_text(child, parts)
+        _append_translatable_text(child, parts, state)
 
 
 def _top_level_math_elements(para) -> list:

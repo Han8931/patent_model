@@ -125,5 +125,16 @@ def classify(state: TranslationState) -> dict:
             mixed=has_non_text_content(para),
         ))
 
-    progress(f"Classified {len(records)} paragraphs")
+    # Per-kind breakdown — surfaces 'classifier saw nothing' or
+    # 'no claims_header detected' situations at a glance, so a doc that
+    # finishes translation in milliseconds is immediately diagnosable.
+    counts: dict[str, int] = {}
+    for r in records:
+        counts[r.kind] = counts.get(r.kind, 0) + 1
+    sections_seen = sorted({r.section for r in records if r.section})
+    breakdown = ", ".join(f"{n} {k}" for k, n in sorted(counts.items()))
+    progress(
+        f"Classified {len(records)} paragraphs "
+        f"({breakdown}; sections={sections_seen or 'none-detected'})"
+    )
     return {"records": records}
