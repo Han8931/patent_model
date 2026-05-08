@@ -41,6 +41,14 @@ def main() -> None:
         "x, y, and z correspond to a row, a column, and a layer, respectively.",
         "x corresponds to a row;\ny corresponds to a column;\nz corresponds to a layer.",
     )
+    _assert_postprocess(
+        "where alpha, beta, and gamma is a first value; is a second value; is a third value.",
+        "where alpha is a first value;\nbeta is a second value;\ngamma is a third value.",
+    )
+    _assert_postprocess(
+        "wherein α, β, and γ is a first value; wherein is a second value; wherein is a third value.",
+        "wherein α is a first value;\nβ is a second value;\nγ is a third value.",
+    )
     print("parameter respectively expansion: ok")
 
 

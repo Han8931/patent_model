@@ -386,6 +386,12 @@ _VERB = (
     r'correspond\s+to|corresponds\s+to'
 )
 
+_LEGEND_VERB = (
+    r'is|are|denote|denotes|represent|represents|stand\s+for|stands\s+for|'
+    r'indicate|indicates|mean|means|refer\s+to|refers\s+to|'
+    r'correspond\s+to|corresponds\s+to'
+)
+
 _RESPECTIVELY_AFTER_VALUES_RE = re.compile(
     rf'(?P<symbols>{_SYM}'
     rf'(?:\s*,\s*{_SYM}){{1,8}}'
@@ -411,6 +417,7 @@ _RESPECTIVELY_BEFORE_VERB_RE = re.compile(
 )
 
 _VERB_SINGULAR = {
+    "is": "is",
     "are": "is",
     "denote": "denotes",
     "denotes": "denotes",
@@ -427,6 +434,23 @@ _VERB_SINGULAR = {
     "correspond to": "corresponds to",
     "corresponds to": "corresponds to",
 }
+
+_MALFORMED_SEMICOLON_LEGEND_RE = re.compile(
+    rf'(?P<prefix>\bwhere(?:in)?\s+)'
+    rf'(?P<symbols>{_SYM}'
+    rf'(?:\s*,\s*{_SYM}){{1,8}}'
+    rf'(?:\s*,?\s*and\s+{_SYM})?)'
+    rf'\s+(?P<verb>{_LEGEND_VERB})\s+'
+    rf'(?P<first>{_VAL})'
+    rf'(?P<rest>(?:\s*;\s*(?:where(?:in)?\s+)?'
+    rf'(?:{_LEGEND_VERB})\s+{_VAL}){{1,8}})',
+    flags=re.IGNORECASE,
+)
+
+_BARE_LEGEND_CLAUSE_RE = re.compile(
+    rf'^\s*;\s*(?:where(?:in)?\s+)?(?P<verb>{_LEGEND_VERB})\s+(?P<value>{_VAL})',
+    flags=re.IGNORECASE,
+)
 
 
 def _split_list(text: str) -> list[str]:
@@ -449,9 +473,38 @@ def _expand_respectively(text: str) -> str:
     return _RESPECTIVELY_BEFORE_VERB_RE.sub(repl, text)
 
 
+def _repair_malformed_semicolon_legend(text: str) -> str:
+    """Repair 'where A, B, and C is X; is Y; is Z' style legends."""
+
+    def repl(m: re.Match) -> str:
+        symbols = _split_list(m.group("symbols"))
+        values = [m.group("first").strip()]
+        verbs = [m.group("verb")]
+        for raw_clause in re.findall(r'\s*;\s*(?:where(?:in)?\s+)?(?:' + _LEGEND_VERB + r')\s+[^;.]+', m.group("rest"), flags=re.IGNORECASE):
+            clause_match = _BARE_LEGEND_CLAUSE_RE.match(raw_clause)
+            if clause_match is None:
+                return m.group(0)
+            verbs.append(clause_match.group("verb"))
+            values.append(clause_match.group("value").strip())
+
+        if len(symbols) != len(values) or len(symbols) < 2:
+            return m.group(0)
+
+        clauses: list[str] = []
+        for i, (symbol, verb, value) in enumerate(zip(symbols, verbs, values)):
+            normalized_verb = re.sub(r'\s+', ' ', verb.lower())
+            singular = _VERB_SINGULAR.get(normalized_verb, normalized_verb)
+            prefix = m.group("prefix") if i == 0 else ""
+            clauses.append(f"{prefix}{symbol} {singular} {value}")
+        return "; ".join(clauses)
+
+    return _MALFORMED_SEMICOLON_LEGEND_RE.sub(repl, text)
+
+
 def postprocess(text: str) -> str:
     text = _normalize_unicode(text)
     text = _expand_respectively(text)
+    text = _repair_malformed_semicolon_legend(text)
     text = _break_sentences(text)
     text = _break_after_semicolons(text)
     return text
