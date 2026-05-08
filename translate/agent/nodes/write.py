@@ -25,25 +25,58 @@ _EQUATION_TOKEN_RE = re.compile(r'\[EQUATION(?:_\d+)?\]')
 # Splits an English description blob like
 #   'where A is a thickness, B is a width, X is a length'
 # into per-symbol clauses. The verb may be 'is/are/denotes/represents/...'.
+#
+# A "symbol" is any non-whitespace, non-{,;} run that starts with either
+# a letter (Latin / Greek / math-italic) or one of these math-bracket chars:
+#   〖 〗 ( ) [ ] | { }
+# This is broad enough to catch '〖BIT〗_3k', '〖BIT〗_(3k+1)', 'θ_k', 'LLR',
+# '|μ|' etc. while still rejecting common English words at clause boundaries.
+_SYM_FIRST = r"[^\W\d_]|[〖〗()\[\]|{}]"
 _PARAM_CLAUSE_START_RE = re.compile(
-    r"(?:^|[;,]\s*|\s+and\s+)"
-    r"(?P<sym>[^\W\d_][^\W\d_0-9_]*[\w₀-₉_']*)"
+    r"(?:^|[;,]\s*|\s+and\s+|\s+wherein\s+|\s+where\s+|\s+in\s+which\s+)"
+    rf"(?P<sym>(?:{_SYM_FIRST})[^\s,;]*)"
     r"\s+(?:is|are|denotes?|represents?|stands?\s+for|indicates?|means?)\b",
     re.IGNORECASE | re.UNICODE,
+)
+
+
+_VERB_RE = (
+    r"is|are|denotes?|represents?|stands?\s+for|indicates?|means?"
+)
+# Matches the broken 'sym1 sym2 ... symN  <verb>  desc1; desc2; ...' shape:
+#   'LLR θ_k 〖BIT〗_3k μ is the bit reliability data; is the phase-difference …'
+_LIST_THEN_DESCS_RE = re.compile(
+    rf"^\s*(?P<sym_list>(?:(?:{_SYM_FIRST})[^\s,;]*)"
+    rf"(?:[\s,]+(?:(?:{_SYM_FIRST})[^\s,;]*)){{1,15}})"
+    rf"\s+(?P<verb>{_VERB_RE})\s+"
+    r"(?P<descs>.+)\Z",
+    re.IGNORECASE | re.UNICODE | re.DOTALL,
 )
 
 
 def _split_into_parameter_clauses(text: str) -> list[tuple[str, str]]:
     """Parse a description blob into (symbol, full_clause) pairs.
 
-    Drops a leading 'where'/'wherein'/'in which' if present. Each returned
-    clause includes the symbol so it can be inserted back into the document
-    as-is. Preserves source order.
+    Try the degenerate 'symbols listed, then bare descriptions' shape FIRST:
+        'LLR θ_k 〖BIT〗_3k μ is X; is Y; is Z'
+    so we don't get fooled by an inline 'k is an integer' fragment that pass 1
+    would otherwise return as the only match. If that shape doesn't fit, fall
+    back to the well-formed '<sym> <verb> <desc>' scan.
+
+    Each returned clause includes its symbol so it can be inserted back into
+    the document as-is.
     """
     cleaned = re.sub(
         r"^[\s,;]*(?:where|wherein|in\s+which)\s+",
         "", text.strip(), flags=re.IGNORECASE,
     )
+
+    # Pass 2 (try first): degenerate 'list-then-descriptions' shape.
+    repaired = _repair_list_then_descs(cleaned)
+    if repaired:
+        return repaired
+
+    # Pass 1: well-formed clauses.
     matches = list(_PARAM_CLAUSE_START_RE.finditer(cleaned))
     if not matches:
         return []
@@ -54,6 +87,85 @@ def _split_into_parameter_clauses(text: str) -> list[tuple[str, str]]:
         clause_end = matches[i + 1].start() if i + 1 < len(matches) else len(cleaned)
         clause = cleaned[clause_start:clause_end].strip(" ,;.\t\n")
         pairs.append((sym, clause))
+    return pairs
+
+
+_INNER_CLAUSE_RE = re.compile(
+    rf"^\s*(?P<sym>(?:{_SYM_FIRST})[^\s,;]*)\s+(?:{_VERB_RE})\b",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _repair_list_then_descs(blob: str) -> list[tuple[str, str]]:
+    """Detect and pair the broken format
+        'sym1 sym2 ... symN  <verb>  desc1; desc2; ...; descN'
+
+    Pairing strategy is greedy by *next unused symbol*, not by index, so that
+    if one of the description fragments is already a complete clause about a
+    differently-named symbol (e.g. an inline 'k is an integer'), we don't
+    overwrite an unused symbol slot — the inline fragment uses its own symbol
+    and the unused symbol gets a placeholder. Nothing is silently dropped.
+
+    Returns [] when the shape doesn't match.
+    """
+    m = _LIST_THEN_DESCS_RE.match(blob)
+    if not m:
+        return []
+
+    sym_list_raw = m.group("sym_list")
+    descs_raw = m.group("descs")
+
+    symbols = [s.strip(" ,;.") for s in re.split(r"[\s,]+", sym_list_raw) if s.strip()]
+    fillers = {"the", "a", "an", "of", "in", "at", "on", "and", "or", "to", "for"}
+    if any(s.lower() in fillers for s in symbols):
+        return []
+    if len(symbols) < 2:
+        return []
+
+    desc_fragments = [
+        d.strip(" ,;.\t\n") for d in re.split(r"\s*;\s*", descs_raw) if d.strip()
+    ]
+
+    pairs: list[tuple[str, str]] = []
+    used: set[str] = set()
+    sym_iter = iter(symbols)
+
+    def _next_unused() -> str | None:
+        for s in sym_iter:
+            if s.lower() not in used:
+                return s
+        return None
+
+    for frag in desc_fragments:
+        inner = _INNER_CLAUSE_RE.match(frag)
+        if inner:
+            # Frag is already a complete '<sym> <verb> <desc>' clause —
+            # use its own symbol and don't burn one from the list.
+            inner_sym = inner.group("sym")
+            pairs.append((inner_sym, frag))
+            used.add(inner_sym.lower())
+            continue
+        sym = _next_unused()
+        if sym is None:
+            # Nothing left to pair against — append as a continuation of the
+            # previous clause so the description text isn't lost.
+            if pairs:
+                last_sym, last_clause = pairs[-1]
+                pairs[-1] = (last_sym, f"{last_clause}; {frag}")
+            continue
+        cleaned_frag = re.sub(
+            r"^(?:is|are|denotes?|represents?|stands?\s+for|indicates?|means?)\s+",
+            "", frag, flags=re.IGNORECASE,
+        ).strip()
+        pairs.append((sym, f"{sym} is {cleaned_frag}"))
+        used.add(sym.lower())
+
+    # Any symbols that never received a description: emit a placeholder so
+    # they remain visible in the output (and you can tell they need attention).
+    for sym in symbols:
+        if sym.lower() not in used:
+            pairs.append((sym, f"{sym} is …"))
+
     return pairs
 
 
