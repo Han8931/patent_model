@@ -95,11 +95,31 @@ def _system_with_glossary(prompt: Prompt, glossary: dict[str, str]) -> str:
     )
 
 
+def _format_equation_context(equation_context: dict[str, str] | None) -> str:
+    if not equation_context:
+        return ""
+    lines = [
+        "",
+        "EQUATION FORMULA CONTEXT (DO NOT output this block):",
+        "- Use these formulas only to pair each Korean parameter legend item",
+        "  with the equation and symbol it describes.",
+        "- Keep only the [EQUATION_N] markers in the translation. Do not copy,",
+        "  restate, translate, or expand these formula-context lines.",
+    ]
+    for marker, formula in equation_context.items():
+        lines.append(f"  {marker}: {formula}")
+    return "\n".join(lines) + "\n"
+
+
 # ---------------------------------------------------------------------------
 # Body — translate one chunk per call (chunk may span multiple paragraphs joined with \n)
 # ---------------------------------------------------------------------------
 
-def build_body_messages(chunk_text: str, glossary: dict[str, str]) -> list[dict]:
+def build_body_messages(
+    chunk_text: str,
+    glossary: dict[str, str],
+    equation_context: dict[str, str] | None = None,
+) -> list[dict]:
     system = _system_with_glossary(PROMPT_BODY, glossary)
     layout_repair = (
         _COMBINED_LEGEND_INSTRUCTION
@@ -113,8 +133,11 @@ def build_body_messages(chunk_text: str, glossary: dict[str, str]) -> list[dict]
         "- If the source alternates marker + description, marker + description, the translation\n"
         "  must alternate the SAME way: e.g. '[EQUATION_1] + its description, then [EQUATION_2] +\n"
         "  its description.' NEVER output '[EQUATION_1] [EQUATION_2] description1 description2'.\n"
+        "- When translating '여기서' parameter legends, keep the symbol attached to its own\n"
+        "  description. NEVER write a bare clause like 'wherein is ...' with the symbol omitted.\n"
         "- Emit exactly the same number of [EQUATION_N] tokens as the input.\n"
         f"{layout_repair}"
+        f"{_format_equation_context(equation_context)}"
         "Output JSON ONLY in this schema:\n"
         '{"text": "<English translation>", "key_terms": [{"ko": "<Korean term>", "en": "<English term>"}]}\n'
         "key_terms must list significant technical noun phrases you translated (components, materials, processes).\n"
@@ -167,10 +190,17 @@ _SHARED_CLAIM_RULES = (
     "  summarize any of them.\n"
     "- Never render parameter legends in comma-list/respectively form. Use one symbol-description\n"
     "  clause per parameter: 'α is ...; β is ...; γ is ...'.\n"
+    "- Every parameter clause must explicitly begin with the symbol it describes. NEVER write\n"
+    "  malformed clauses like 'wherein is ...' or '<symbol1> <symbol2> <symbol3>, μ is ...'.\n"
 )
 
 
-def _independent_user_prompt(claim_num: int, kind: ClaimKind, chunk_text: str) -> str:
+def _independent_user_prompt(
+    claim_num: int,
+    kind: ClaimKind,
+    chunk_text: str,
+    equation_context: dict[str, str] | None = None,
+) -> str:
     layout_repair = (
         _COMBINED_LEGEND_INSTRUCTION
         if _has_combined_legend_pattern(chunk_text) else ""
@@ -180,6 +210,7 @@ def _independent_user_prompt(claim_num: int, kind: ClaimKind, chunk_text: str) -
         "Use the kind-specific PREAMBLE template and ELEMENT GRAMMAR from the system message.\n"
         + _SHARED_CLAIM_RULES
         + layout_repair
+        + _format_equation_context(equation_context)
         + "\n"
         "Output JSON ONLY:\n"
         '{"text": "<English claim sentence>", "key_terms": [{"ko": "...", "en": "..."}]}\n'
@@ -197,6 +228,7 @@ def _dependent_user_prompt(
     parent_claim_nums: list[int],
     multi_parent_kind: MultiParent,
     method_connective: str,
+    equation_context: dict[str, str] | None = None,
 ) -> str:
     preamble = build_dependent_preamble(
         parent_spec, parent_claim_nums, multi_parent_kind
@@ -234,6 +266,7 @@ def _dependent_user_prompt(
         "\n"
         + _SHARED_CLAIM_RULES
         + layout_repair
+        + _format_equation_context(equation_context)
         + "\n"
         "Output JSON ONLY:\n"
         '{"text": "<English claim sentence>", "key_terms": [{"ko": "...", "en": "..."}]}\n'
@@ -254,6 +287,7 @@ def build_claim_messages(
     parent_claim_nums: list[int] | None = None,
     multi_parent_kind: MultiParent = "single",
     method_connective: str = "wherein",
+    equation_context: dict[str, str] | None = None,
 ) -> list[dict]:
     """Build messages for one claim translation call.
 
@@ -267,7 +301,9 @@ def build_claim_messages(
     system = _system_with_glossary(prompt, glossary)
 
     if is_independent or parent_spec is None or not parent_claim_nums:
-        user = _independent_user_prompt(claim_num, kind, chunk_text)
+        user = _independent_user_prompt(
+            claim_num, kind, chunk_text, equation_context
+        )
     else:
         user = _dependent_user_prompt(
             claim_num=claim_num,
@@ -277,6 +313,7 @@ def build_claim_messages(
             parent_claim_nums=parent_claim_nums,
             multi_parent_kind=multi_parent_kind,
             method_connective=method_connective,
+            equation_context=equation_context,
         )
     return [
         {"role": "system", "content": system},

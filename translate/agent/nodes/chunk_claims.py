@@ -15,23 +15,37 @@ from __future__ import annotations
 import re
 
 from ..claim_classifier import classify_claim
-from ..docx_utils import extract_all_text, has_drawing, has_math
+from ..docx_utils import extract_all_text, extract_math_texts, has_drawing, has_math
 from ..state import Chunk, TranslationState
 
 
 _EQUATION_TOKEN_RE = re.compile(r'\[EQUATION(?:_\d+)?\]')
 
 
-def _number_equation_placeholders(text: str, next_number: int) -> tuple[str, int]:
+def _number_equation_placeholders(
+    text: str,
+    next_number: int,
+) -> tuple[str, int, list[str]]:
     """Give each equation in a claim a stable marker for order preservation."""
+    markers: list[str] = []
 
     def repl(_: re.Match) -> str:
         nonlocal next_number
         marker = f"[EQUATION_{next_number}]"
+        markers.append(marker)
         next_number += 1
         return marker
 
-    return _EQUATION_TOKEN_RE.sub(repl, text), next_number
+    return _EQUATION_TOKEN_RE.sub(repl, text), next_number, markers
+
+
+def _add_equation_context(
+    context: dict[str, str],
+    markers: list[str],
+    formulas: list[str],
+) -> None:
+    for marker, formula in zip(markers, formulas):
+        context[marker] = formula
 
 
 def chunk_claims(state: TranslationState) -> dict:
@@ -41,12 +55,13 @@ def chunk_claims(state: TranslationState) -> dict:
     current_claim_num: int | None = None
     current_indices: list[int] = []
     current_text_parts: list[str] = []
+    current_equation_context: dict[str, str] = {}
     header_index: int | None = None
     next_equation_number = 1
 
     def flush() -> None:
         nonlocal current_claim_num, current_indices, current_text_parts
-        nonlocal header_index, next_equation_number
+        nonlocal current_equation_context, header_index, next_equation_number
         if current_claim_num is not None and (current_indices or header_index is not None):
             indices: list[int] = []
             if header_index is not None:
@@ -58,10 +73,12 @@ def chunk_claims(state: TranslationState) -> dict:
                 kind="claim",
                 paragraph_indices=indices,
                 text="\n".join(current_text_parts),
+                equation_context=dict(current_equation_context),
                 claim_num=current_claim_num,
             ))
         current_indices = []
         current_text_parts = []
+        current_equation_context = {}
         header_index = None
         next_equation_number = 1
 
@@ -92,9 +109,15 @@ def chunk_claims(state: TranslationState) -> dict:
                 current_claim_num = r.claim_num
                 # No standalone header — this paragraph is the head of the claim
                 header_index = None
-            text, next_equation_number = _number_equation_placeholders(
+            text, next_equation_number, markers = _number_equation_placeholders(
                 r.raw, next_equation_number
             )
+            if markers and has_math(r.para) and not has_drawing(r.para):
+                _add_equation_context(
+                    current_equation_context,
+                    markers,
+                    extract_math_texts(r.para),
+                )
             current_indices.append(r.index)
             current_text_parts.append(text)
             continue
@@ -106,8 +129,13 @@ def chunk_claims(state: TranslationState) -> dict:
             and has_math(r.para)
             and not has_drawing(r.para)
         ):
-            text, next_equation_number = _number_equation_placeholders(
+            text, next_equation_number, markers = _number_equation_placeholders(
                 extract_all_text(r.para) or "[EQUATION]", next_equation_number
+            )
+            _add_equation_context(
+                current_equation_context,
+                markers,
+                extract_math_texts(r.para),
             )
             current_indices.append(r.index)
             current_text_parts.append(text)

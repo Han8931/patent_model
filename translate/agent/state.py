@@ -37,6 +37,7 @@ class Chunk:
     kind: Literal["body", "abstract", "claim"]
     paragraph_indices: list[int]   # indices into state.records
     text: str                      # joined Korean text
+    equation_context: dict[str, str] = field(default_factory=dict)
     claim_num: int | None = None
     translation: str | None = None  # filled by translate_* nodes
 

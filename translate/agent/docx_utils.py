@@ -111,6 +111,21 @@ def _top_level_math_elements(para) -> list:
     return elements
 
 
+def extract_math_texts(para) -> list[str]:
+    """Return visible text from each top-level equation in a paragraph.
+
+    Unlike extract_all_text(), this exposes formula notation so prompts can use
+    it as non-output context for assigning parameter legends to equations.
+    """
+    return [
+        text for text in (
+            _element_text(el).strip()
+            for el in _top_level_math_elements(para)
+        )
+        if text
+    ]
+
+
 def _remove_korean_math(para) -> None:
     """Remove equation XML whose own text contains Korean.
 

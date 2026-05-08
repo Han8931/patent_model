@@ -25,7 +25,13 @@ def translate_body(state: TranslationState) -> dict:
     progress(f"Translating BODY ({total} chunks)…")
     for i, chunk in enumerate(chunks, 1):
         try:
-            raw = client.complete(build_body_messages(chunk.text, glossary))
+            raw = client.complete(
+                build_body_messages(
+                    chunk.text,
+                    glossary,
+                    equation_context=chunk.equation_context,
+                )
+            )
             data = extract_json_block(raw) or {}
             text = (data.get("text") or "").strip()
             if not text:

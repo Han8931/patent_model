@@ -165,6 +165,7 @@ PROMPT_BODY = register_prompt(Prompt(
         "  THAT equation only — keep it adjacent to the same marker. Translate every '<symbol>는/은 ...'\n"
         "  item; do not merge, drop, or summarize.\n"
         "  BAD : 'α, β, and γ are X, Y, and Z, respectively.'\n"
+        "  BAD : 'wherein is a phase difference value.'\n"
         "  GOOD: 'α is X; β is Y; γ is Z.'\n"
         "- The number of [EQUATION_N] tokens you emit MUST equal the number you received.\n"
     ),
@@ -209,6 +210,8 @@ _CLAIMS_BASE_RULES = (
     "  clause and do not drop any. If the source lists 5 parameters, output 5 clauses.\n"
     "- Never render parameter legends in comma-list/respectively form. Use one symbol-description\n"
     "  clause per parameter: 'α is ...; β is ...; γ is ...'.\n"
+    "- Every parameter clause must explicitly begin with the symbol it describes. NEVER write\n"
+    "  malformed clauses like 'wherein is ...' or '<symbol1> <symbol2> <symbol3>, μ is ...'.\n"
     "\n"
     "FORMATTING:\n"
     "- After ':' and after each ';', insert a newline to list elements on separate lines.\n"

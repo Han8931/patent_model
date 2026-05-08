@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 
+from ..docx_utils import extract_math_texts, has_drawing, has_math
 from ..sections import BODY_SECTIONS
 from ..state import Chunk, TranslationState
 
@@ -31,16 +32,30 @@ def _is_continuation(text: str) -> bool:
     return bool(s) and s.endswith(_CONTINUATION_TAILS)
 
 
-def _number_equation_placeholders(text: str, next_number: int) -> tuple[str, int]:
+def _number_equation_placeholders(
+    text: str,
+    next_number: int,
+) -> tuple[str, int, list[str]]:
     """Replace each [EQUATION] (and stray numbered forms) with stable [EQUATION_N]."""
+    markers: list[str] = []
 
     def repl(_: re.Match) -> str:
         nonlocal next_number
         marker = f"[EQUATION_{next_number}]"
+        markers.append(marker)
         next_number += 1
         return marker
 
-    return _EQUATION_TOKEN_RE.sub(repl, text), next_number
+    return _EQUATION_TOKEN_RE.sub(repl, text), next_number, markers
+
+
+def _add_equation_context(
+    context: dict[str, str],
+    markers: list[str],
+    formulas: list[str],
+) -> None:
+    for marker, formula in zip(markers, formulas):
+        context[marker] = formula
 
 
 def chunk_body(state: TranslationState) -> dict:
@@ -81,8 +96,17 @@ def chunk_body(state: TranslationState) -> dict:
 
         next_eq = 1
         numbered_parts: list[str] = []
+        equation_context: dict[str, str] = {}
         for r in group:
-            numbered, next_eq = _number_equation_placeholders(r.raw, next_eq)
+            numbered, next_eq, markers = _number_equation_placeholders(
+                r.raw, next_eq
+            )
+            if markers and has_math(r.para) and not has_drawing(r.para):
+                _add_equation_context(
+                    equation_context,
+                    markers,
+                    extract_math_texts(r.para),
+                )
             numbered_parts.append(numbered)
 
         chunks.append(Chunk(
@@ -91,6 +115,7 @@ def chunk_body(state: TranslationState) -> dict:
             kind="body",
             paragraph_indices=[r.index for r in group],
             text="\n".join(numbered_parts),
+            equation_context=equation_context,
         ))
         chunk_idx += 1
         i += len(group)

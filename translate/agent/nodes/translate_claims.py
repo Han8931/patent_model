@@ -64,6 +64,7 @@ def _translate_one(
             parent_claim_nums=chunk.parent_claim_nums,
             multi_parent_kind=chunk.multi_parent_kind,
             method_connective=method_connective,
+            equation_context=chunk.equation_context,
         )
         raw = client.complete(messages)
         data = extract_json_block(raw) or {}

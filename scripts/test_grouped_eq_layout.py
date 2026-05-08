@@ -98,6 +98,17 @@ class StubClient:
             print("[stub] user prompt contains layout-repair instruction ✓")
         else:
             print("[stub] user prompt MISSING layout-repair instruction ✗")
+        if all(
+            item in user
+            for item in (
+                "[EQUATION_1]: A = B + C",
+                "[EQUATION_2]: X = Y × Z",
+                "[EQUATION_3]: M = N - P",
+            )
+        ):
+            print("[stub] user prompt contains equation formula context ✓")
+        else:
+            print("[stub] user prompt MISSING equation formula context ✗")
         return json.dumps({"text": GOOD_CLAIM, "key_terms": []})
 
 
