@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import re
 import time
+import traceback
+
+
+_HANGUL_RE = re.compile(r"[가-힯]")
 
 from ..docx_utils import (
     consolidate_formula_math_into,
@@ -182,21 +186,127 @@ def _equation_variable_sets(equation_indices: list[int], records) -> list[set[st
     return sets
 
 
+def _vars_are_disjoint(eq_vars: list[set[str]]) -> bool:
+    """True when every pair of equations has zero variables in common.
+
+    Disjoint case (A=B+C, X=Y×Z, M=N-P) — splitting clauses per equation
+    is meaningful. Shared case (3 LLR equations all using LLR/BIT/θ/k/μ) —
+    splitting is meaningless; the legend describes them collectively, so
+    we just clean up the format and keep it as a single block.
+    """
+    if len(eq_vars) < 2:
+        return False
+    for i in range(len(eq_vars)):
+        for j in range(i + 1, len(eq_vars)):
+            if eq_vars[i] & eq_vars[j]:
+                return False
+    return True
+
+
+def _candidate_match_keys(sym: str) -> set[str]:
+    """All keys against which we'll try to match this clause's symbol.
+
+    Includes the full normalized form AND each Unicode letter run in it,
+    so 'θ_k' → {'θ_k', 'θ', 'k'} and '〖BIT〗_3k' → {'〖bit〗_3k', 'bit', 'k'}.
+    Equation extraction yields letter runs only ({'bit', 'k', …}), so the
+    letter-run keys are what actually drive the match.
+    """
+    norm = normalize_symbol(sym).lower()
+    runs = set(re.findall(r"[^\W\d_]+", norm, re.UNICODE))
+    runs.add(norm)
+    return runs
+
+
+def _format_legend_clauses(pairs: list[tuple[str, str]]) -> str:
+    """Join clauses into a per-parameter legend body."""
+    return "; ".join(c for _, c in pairs)
+
+
+def _split_per_equation(
+    parts: list[str],
+    eq_vars: list[set[str]],
+    pairs: list[tuple[str, str]],
+    blob_idx: int,
+) -> list[str]:
+    """Distribute clauses across equations using letter-run matching."""
+    groups: list[list[str]] = [[] for _ in eq_vars]
+    unmatched: list[str] = []
+    for sym, clause in pairs:
+        keys = _candidate_match_keys(sym)
+        assigned = False
+        for i, vars_ in enumerate(eq_vars):
+            if keys & vars_:
+                groups[i].append(clause)
+                assigned = True
+                break
+        if not assigned:
+            unmatched.append(clause)
+    if not any(groups):
+        return parts
+
+    new_body: list[str] = []
+    for i, group in enumerate(groups):
+        if not group:
+            new_body.append("")
+            continue
+        joined = "; ".join(group)
+        end = "." if i == len(groups) - 1 else ";"
+        new_body.append(", where " + joined + end)
+
+    if unmatched:
+        tail = "; ".join(unmatched)
+        target = blob_idx if 0 <= blob_idx < len(new_body) else len(new_body) - 1
+        if new_body[target]:
+            stripped = new_body[target].rstrip(".;")
+            end = "." if target == len(new_body) - 1 else ";"
+            new_body[target] = stripped + "; " + tail + end
+        else:
+            end = "." if target == len(new_body) - 1 else ";"
+            new_body[target] = ", where " + tail + end
+
+    return [parts[0]] + new_body
+
+
+def _reformat_only(
+    parts: list[str],
+    pairs: list[tuple[str, str]],
+    blob_idx: int,
+) -> list[str]:
+    """Convert the blob into per-clause text and keep it at its original slot.
+
+    Used when the equations share variables (legend is collective) or when
+    we couldn't extract any equation variables to match against. The
+    important property is that ALL clauses are preserved AND each parameter
+    gets its own clause — no list-then-descs, no respectively, no dropped
+    parameters.
+    """
+    is_last = blob_idx == len(parts) - 2
+    end = "." if is_last else ";"
+    text = "wherein " + _format_legend_clauses(pairs) + end
+    new_body = list(parts[1:])
+    new_body[blob_idx] = text
+    return [parts[0]] + new_body
+
+
 def _redistribute_grouped_parameters(
     parts: list[str],
     equation_indices: list[int],
     records,
 ) -> list[str]:
-    """If the LLM bunched all parameter clauses at one slot, reassign each
-    clause to the equation that actually uses its symbol.
+    """Rewrite a grouped parameter blob into per-clause form.
 
-    Bails out (returns ``parts`` unchanged) when:
-      - parts is already distributed across multiple slots,
-      - there's no recognizable per-symbol structure in the blob,
-      - none of the clause symbols match any equation's variables.
+    Three behaviors:
+      1. Already distributed (multiple body slots non-empty) → return unchanged.
+      2. Shared-variable equations or no extractable variables →
+         reformat the blob into '<sym> is <desc>; <sym> is <desc>; …' and
+         keep it at the slot the LLM put it.
+      3. Disjoint-variable equations (e.g. A=B+C, X=Y×Z, M=N-P) → split per
+         equation by letter-run matching, so each equation is followed by
+         only its own parameter clauses.
 
-    Never drops a clause: unmatched clauses go to the slot that originally
-    held the blob, so the legend text always survives the rewrite.
+    Never drops a clause. Inline complete clauses (e.g. 'k is an integer'
+    sitting in a fragment) are kept verbatim and use their own symbol so
+    they don't burn an unused symbol slot.
     """
     if len(parts) <= 1 or not equation_indices:
         return parts
@@ -204,7 +314,7 @@ def _redistribute_grouped_parameters(
     body = parts[1:]
     non_empty = [(i, p.strip()) for i, p in enumerate(body) if p.strip()]
     if len(non_empty) != 1:
-        return parts  # already split, or empty — nothing to do
+        return parts
     blob_idx, blob = non_empty[0]
 
     pairs = _split_into_parameter_clauses(blob)
@@ -212,52 +322,10 @@ def _redistribute_grouped_parameters(
         return parts
 
     eq_vars = _equation_variable_sets(equation_indices, records)
-    if not any(eq_vars):
-        return parts
 
-    groups: list[list[str]] = [[] for _ in equation_indices]
-    unmatched: list[str] = []
-    for sym, clause in pairs:
-        norm = normalize_symbol(sym).lower()
-        assigned = False
-        for i, vars_ in enumerate(eq_vars):
-            if norm in vars_:
-                groups[i].append(clause)
-                assigned = True
-                break
-        if not assigned:
-            unmatched.append(clause)
-
-    if not any(groups):
-        return parts  # no symbol matched any equation — give up
-
-    # Format each group into "<leading punct>where <c1>; <c2>; ..." form.
-    new_body: list[str] = []
-    for i, group in enumerate(groups):
-        if not group:
-            new_body.append("")
-            continue
-        joined = "; ".join(group)
-        # Last group ends with '.', earlier ones with ';' to chain into next eq.
-        if i == len(groups) - 1:
-            joined = ", where " + joined + "."
-        else:
-            joined = ", where " + joined + ";"
-        new_body.append(joined)
-
-    # Append unmatched clauses to the slot the blob originally lived in,
-    # so we never silently drop legend text.
-    if unmatched:
-        tail = "; ".join(unmatched)
-        target = blob_idx if 0 <= blob_idx < len(new_body) else len(new_body) - 1
-        if new_body[target]:
-            # Splice into existing group.
-            stripped = new_body[target].rstrip(".;")
-            new_body[target] = stripped + "; " + tail + ("." if target == len(new_body) - 1 else ";")
-        else:
-            new_body[target] = ", where " + tail + ("." if target == len(new_body) - 1 else ";")
-
-    return [parts[0]] + new_body
+    if any(eq_vars) and _vars_are_disjoint(eq_vars):
+        return _split_per_equation(parts, eq_vars, pairs, blob_idx)
+    return _reformat_only(parts, pairs, blob_idx)
 
 
 def _claim_equation_indices(chunk: Chunk, records) -> list[int]:
@@ -418,6 +486,50 @@ def _apply_chunk(chunk: Chunk, records, font: str) -> None:
         replace_text(records[idx].para, "", font)
 
 
+def _safe_apply_chunk(chunk: Chunk, records, font: str, progress, verbose: bool) -> bool:
+    """Apply one chunk's translation, isolating any crash to that chunk only.
+
+    Returns True on success. On failure: logs the chunk id + traceback, leaves
+    the chunk's source paragraphs untouched (Korean visible), and returns False
+    so the caller can report how many chunks failed.
+
+    Why per-chunk isolation: a single paragraph with unusual XML (rare drawing
+    constructs, custom field codes, fractured runs, etc.) used to abort the
+    entire write. The user then got back the *pre-copied original* — a silent
+    Korean failure. Now any one failure leaves only that chunk's source visible.
+    """
+    try:
+        _apply_chunk(chunk, records, font)
+        return True
+    except Exception as exc:
+        msg = f"  WRITE FAILED on chunk {chunk.id} (paragraphs {chunk.paragraph_indices}): {type(exc).__name__}: {exc}"
+        progress(msg)
+        if verbose:
+            traceback.print_exc()
+        return False
+
+
+def _korean_char_ratio(doc) -> float:
+    """Fraction of letters in the document that are Hangul.
+
+    Char-based instead of paragraph-based because static section headers like
+    'CLAIMS' / 'ABSTRACT' get rewritten by ``apply_static`` even when every
+    LLM call fails — those English headers would otherwise dilute a
+    paragraph-based ratio and hide the catastrophe. Counts only letters
+    (skips digits, punctuation, whitespace) so paragraph numbering and
+    bracket decoration don't skew the ratio either.
+    """
+    hangul = 0
+    letters = 0
+    for p in doc.paragraphs:
+        for ch in (p.text or ""):
+            if ch.isalpha():
+                letters += 1
+                if "가" <= ch <= "힣":
+                    hangul += 1
+    return hangul / letters if letters else 0.0
+
+
 def write(state: TranslationState) -> dict:
     doc = state["doc"]
     records = state["records"]
@@ -433,25 +545,53 @@ def write(state: TranslationState) -> dict:
     for idx, r in by_index.items():
         indexed_records[idx] = r
 
-    # Apply body, abstract, claims chunks
+    # Apply body, abstract, claims chunks. Per-chunk isolation so one bad
+    # paragraph doesn't sink the whole document save.
+    failed = 0
+    total = 0
     for chunk in state.get("chunks_body", []):
-        _apply_chunk(chunk, indexed_records, font)
+        total += 1
+        if not _safe_apply_chunk(chunk, indexed_records, font, progress, verbose):
+            failed += 1
     for chunk in state.get("chunks_abstract", []):
-        _apply_chunk(chunk, indexed_records, font)
+        total += 1
+        if not _safe_apply_chunk(chunk, indexed_records, font, progress, verbose):
+            failed += 1
     for chunk in state.get("chunks_claims", []):
-        _apply_chunk(chunk, indexed_records, font)
+        total += 1
+        if not _safe_apply_chunk(chunk, indexed_records, font, progress, verbose):
+            failed += 1
+
+    if total and failed:
+        progress(f"WARNING: {failed}/{total} chunks failed to write — those paragraphs remain in Korean.")
 
     # Abstract word count footer — insert after the LAST paragraph of the abstract
     # chunk (so the footer appears after the translated body, not in the middle).
     abstract_chunks = state.get("chunks_abstract", [])
     if abstract_chunks and abstract_chunks[0].translation:
-        ab = abstract_chunks[0]
-        last_idx = ab.paragraph_indices[-1]
-        last_para = indexed_records[last_idx].para
-        count = word_count(ab.translation)
-        insert_para_after(last_para, f"({count})", font)
-        if verbose:
-            print(f"\nABSTRACT word count → ({count})")
+        try:
+            ab = abstract_chunks[0]
+            last_idx = ab.paragraph_indices[-1]
+            last_para = indexed_records[last_idx].para
+            count = word_count(ab.translation)
+            insert_para_after(last_para, f"({count})", font)
+            if verbose:
+                print(f"\nABSTRACT word count → ({count})")
+        except Exception as exc:
+            progress(f"  WARNING: abstract word-count footer failed: {type(exc).__name__}: {exc}")
+
+    # Sanity check: refuse to save an output that is overwhelmingly Korean.
+    # That signals every chunk's LLM call returned untranslated text (rate
+    # limit, auth error, network), or the entire write loop bailed out.
+    # Char-based ratio so static English section headers can't mask a
+    # catastrophic translation failure.
+    ratio = _korean_char_ratio(doc)
+    if ratio > 0.40:
+        raise RuntimeError(
+            f"Translation appears to have failed: {ratio:.0%} of the document's letters are still Hangul. "
+            f"Refusing to save {output_path} so you don't end up with a fake-translated file. "
+            "Check the LLM connection (LLM_API_KEY, LLM_BASE_URL) and rerun."
+        )
 
     doc.save(output_path)
     elapsed = time.time() - started_at

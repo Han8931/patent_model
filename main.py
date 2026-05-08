@@ -93,14 +93,24 @@ def main() -> None:
     output = resolve_output(args.input, args.output)
 
     translator = PatentTranslator(config, batch_size=args.batch_size)
-    translator.translate_document(
-        args.input,
-        output,
-        font=args.font,
-        delay=args.delay,
-        verbose=not args.quiet,
-        review=not args.no_review,
-    )
+    try:
+        translator.translate_document(
+            args.input,
+            output,
+            font=args.font,
+            delay=args.delay,
+            verbose=not args.quiet,
+            review=not args.no_review,
+        )
+    except Exception:
+        # On any failure, remove a partial output so the user can't mistake a
+        # half-written or zero-translated file for a successful run.
+        try:
+            if output.exists():
+                output.unlink()
+        except OSError:
+            pass
+        raise
 
 
 if __name__ == "__main__":

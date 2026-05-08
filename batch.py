@@ -78,6 +78,15 @@ def _translate_file(job: dict) -> dict:
         return {"input": str(input_path), "output": str(output_path), "ok": True}
 
     except Exception:
+        # Cleanup: never leave a partial / pre-copied file on disk that the
+        # user could mistake for a successful translation. The graph creates
+        # the output only on a clean run, but a stray write that ran before
+        # the post-write sanity check could still leave a half-written file.
+        try:
+            if output_path.exists():
+                output_path.unlink()
+        except OSError:
+            pass
         print(f"[{name}] FAILED:\n{traceback.format_exc()}")
         return {"input": str(input_path), "output": str(output_path), "ok": False}
 

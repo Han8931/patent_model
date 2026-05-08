@@ -14,6 +14,7 @@ from ..sections import (
     BLANK_RE,
     CLAIM_HEADER_RE,
     SECTION_HEADER_MAP,
+    detect_section_header,
 )
 from ..state import ParagraphRecord, TranslationState
 
@@ -65,7 +66,7 @@ def classify(state: TranslationState) -> dict:
             ))
             continue
 
-        mapped = SECTION_HEADER_MAP.get(stripped)
+        mapped = detect_section_header(stripped)
         if mapped:
             if mapped != current_section:
                 current_section = mapped

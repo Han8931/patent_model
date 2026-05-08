@@ -23,6 +23,55 @@ SECTION_HEADER_MAP = {
     "대표도":                           "REPRESENTATIVE FIGURE",
 }
 
+
+# ---------------------------------------------------------------------------
+# Hangul-signature lookup — fallback when the exact-match map misses.
+# ---------------------------------------------------------------------------
+# Some patents wrap headers with extra decoration (a leading bullet "•",
+# spacing inside brackets "[ 청구범위 ]", different bracket forms (), 〈〉,
+# trailing English ("[청구범위] (Claims)"), etc. The exact-match dict can't
+# cover every variant, so we also derive a Hangul-only signature from the
+# stripped paragraph text and look it up here. A length cap stops ordinary
+# sentences that happen to contain "청구범위" from being mis-tagged as headers.
+
+_HEADER_BY_SIG: dict[str, str] = {}
+
+
+def _hangul_signature(text: str) -> str:
+    """All Hangul syllables in ``text``, no whitespace, no punctuation."""
+    return "".join(c for c in text if "가" <= c <= "힣")
+
+
+for _phrase, _label in SECTION_HEADER_MAP.items():
+    _sig = _hangul_signature(_phrase)
+    if _sig:
+        _HEADER_BY_SIG.setdefault(_sig, _label)
+
+
+# Heuristic length cap: real headers are short (a few words wrapped in
+# brackets, optional trailing English in parens). Anything longer is almost
+# certainly a regular sentence that shouldn't be re-classified.
+_HEADER_MAX_LEN = 60
+
+
+def detect_section_header(stripped: str) -> str | None:
+    """Robust header detection.
+
+    Order:
+      1. exact-match the cleaned text against ``SECTION_HEADER_MAP``,
+      2. fall back to a Hangul-signature lookup (length-capped) so that
+         '• [청구범위]', '[ 청구범위 ]', '[청구범위] (Claims)' all resolve to
+         CLAIMS while ordinary sentences containing the word do not.
+    """
+    if not stripped:
+        return None
+    if stripped in SECTION_HEADER_MAP:
+        return SECTION_HEADER_MAP[stripped]
+    if len(stripped) > _HEADER_MAX_LEN:
+        return None
+    sig = _hangul_signature(stripped)
+    return _HEADER_BY_SIG.get(sig)
+
 # Korean claim header: 【청구항 N】 or [청구항 N] (with optional spaces).
 # No $ — also matches when body text follows on the same paragraph.
 CLAIM_HEADER_RE = re.compile(r'^[【\[]\s*청구항\s*(\d+)\s*[】\]]\s*')
