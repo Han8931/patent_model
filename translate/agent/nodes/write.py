@@ -7,10 +7,13 @@ import time
 
 from ..docx_utils import (
     consolidate_formula_math_into,
+    equations_in_paragraph,
+    extract_equation_variables,
     has_drawing,
     has_math,
     has_non_text_content,
     insert_para_after,
+    normalize_symbol,
     replace_text,
     word_count,
 )
@@ -18,6 +21,131 @@ from ..state import Chunk, TranslationState
 
 
 _EQUATION_TOKEN_RE = re.compile(r'\[EQUATION(?:_\d+)?\]')
+
+# Splits an English description blob like
+#   'where A is a thickness, B is a width, X is a length'
+# into per-symbol clauses. The verb may be 'is/are/denotes/represents/...'.
+_PARAM_CLAUSE_START_RE = re.compile(
+    r"(?:^|[;,]\s*|\s+and\s+)"
+    r"(?P<sym>[^\W\d_][^\W\d_0-9_]*[\w₀-₉_']*)"
+    r"\s+(?:is|are|denotes?|represents?|stands?\s+for|indicates?|means?)\b",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _split_into_parameter_clauses(text: str) -> list[tuple[str, str]]:
+    """Parse a description blob into (symbol, full_clause) pairs.
+
+    Drops a leading 'where'/'wherein'/'in which' if present. Each returned
+    clause includes the symbol so it can be inserted back into the document
+    as-is. Preserves source order.
+    """
+    cleaned = re.sub(
+        r"^[\s,;]*(?:where|wherein|in\s+which)\s+",
+        "", text.strip(), flags=re.IGNORECASE,
+    )
+    matches = list(_PARAM_CLAUSE_START_RE.finditer(cleaned))
+    if not matches:
+        return []
+    pairs: list[tuple[str, str]] = []
+    for i, m in enumerate(matches):
+        sym = m.group("sym")
+        clause_start = m.start("sym")
+        clause_end = matches[i + 1].start() if i + 1 < len(matches) else len(cleaned)
+        clause = cleaned[clause_start:clause_end].strip(" ,;.\t\n")
+        pairs.append((sym, clause))
+    return pairs
+
+
+def _equation_variable_sets(equation_indices: list[int], records) -> list[set[str]]:
+    """For each equation paragraph, the set of (normalized, lowercased) variable names."""
+    sets: list[set[str]] = []
+    for eq_idx in equation_indices:
+        para = records[eq_idx].para
+        names: set[str] = set()
+        for omath in equations_in_paragraph(para):
+            for v in extract_equation_variables(omath):
+                names.add(normalize_symbol(v).lower())
+        sets.append(names)
+    return sets
+
+
+def _redistribute_grouped_parameters(
+    parts: list[str],
+    equation_indices: list[int],
+    records,
+) -> list[str]:
+    """If the LLM bunched all parameter clauses at one slot, reassign each
+    clause to the equation that actually uses its symbol.
+
+    Bails out (returns ``parts`` unchanged) when:
+      - parts is already distributed across multiple slots,
+      - there's no recognizable per-symbol structure in the blob,
+      - none of the clause symbols match any equation's variables.
+
+    Never drops a clause: unmatched clauses go to the slot that originally
+    held the blob, so the legend text always survives the rewrite.
+    """
+    if len(parts) <= 1 or not equation_indices:
+        return parts
+
+    body = parts[1:]
+    non_empty = [(i, p.strip()) for i, p in enumerate(body) if p.strip()]
+    if len(non_empty) != 1:
+        return parts  # already split, or empty — nothing to do
+    blob_idx, blob = non_empty[0]
+
+    pairs = _split_into_parameter_clauses(blob)
+    if len(pairs) < 2:
+        return parts
+
+    eq_vars = _equation_variable_sets(equation_indices, records)
+    if not any(eq_vars):
+        return parts
+
+    groups: list[list[str]] = [[] for _ in equation_indices]
+    unmatched: list[str] = []
+    for sym, clause in pairs:
+        norm = normalize_symbol(sym).lower()
+        assigned = False
+        for i, vars_ in enumerate(eq_vars):
+            if norm in vars_:
+                groups[i].append(clause)
+                assigned = True
+                break
+        if not assigned:
+            unmatched.append(clause)
+
+    if not any(groups):
+        return parts  # no symbol matched any equation — give up
+
+    # Format each group into "<leading punct>where <c1>; <c2>; ..." form.
+    new_body: list[str] = []
+    for i, group in enumerate(groups):
+        if not group:
+            new_body.append("")
+            continue
+        joined = "; ".join(group)
+        # Last group ends with '.', earlier ones with ';' to chain into next eq.
+        if i == len(groups) - 1:
+            joined = ", where " + joined + "."
+        else:
+            joined = ", where " + joined + ";"
+        new_body.append(joined)
+
+    # Append unmatched clauses to the slot the blob originally lived in,
+    # so we never silently drop legend text.
+    if unmatched:
+        tail = "; ".join(unmatched)
+        target = blob_idx if 0 <= blob_idx < len(new_body) else len(new_body) - 1
+        if new_body[target]:
+            # Splice into existing group.
+            stripped = new_body[target].rstrip(".;")
+            new_body[target] = stripped + "; " + tail + ("." if target == len(new_body) - 1 else ";")
+        else:
+            new_body[target] = ", where " + tail + ("." if target == len(new_body) - 1 else ";")
+
+    return [parts[0]] + new_body
 
 
 def _claim_equation_indices(chunk: Chunk, records) -> list[int]:
@@ -98,6 +226,11 @@ def _apply_claim_with_equations(chunk: Chunk, records, font: str) -> bool:
         # If the LLM drops the marker, keep the equations in place and put the
         # translated claim text before them rather than forcing inline layout.
         parts = [translation] + [""] * len(equation_indices)
+
+    # If the LLM grouped every parameter clause at one slot (typical when the
+    # Korean source has 'eq1 eq2 eq3 + combined legend'), redistribute by
+    # matching each clause's symbol to the equation that actually uses it.
+    parts = _redistribute_grouped_parameters(parts, equation_indices, records)
 
     replace_text(records[head_idx].para, parts[0].strip(), font)
 

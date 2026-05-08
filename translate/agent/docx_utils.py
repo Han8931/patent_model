@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from copy import deepcopy
 
 from docx.oxml import OxmlElement
@@ -323,6 +324,65 @@ def insert_para_after(
 
 def word_count(text: str) -> int:
     return len(text.split())
+
+
+# ---------------------------------------------------------------------------
+# Equation variable extraction
+# ---------------------------------------------------------------------------
+# Used by the claim writer to redistribute a grouped parameter legend across
+# its equations. We extract identifier-like tokens from <m:oMath> XML and
+# normalize math-italic Unicode (e.g. 𝛼) to its plain form (α) so symbols in
+# the equation match symbols in the legend regardless of styling.
+
+_FUNC_NAMES = {
+    "sin", "cos", "tan", "sec", "csc", "cot",
+    "sinh", "cosh", "tanh", "log", "ln", "exp",
+    "sqrt", "min", "max", "lim", "inf", "sup",
+    "arg", "det", "mod", "gcd", "lcm",
+}
+
+# Word characters excluding digits and underscore — matches alpha runs in any
+# script (Latin, Greek, math-italic …). We then drop any token that is purely
+# Hangul or otherwise non-math.
+_ALPHA_RUN_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
+_HANGUL_ONLY_RE = re.compile(r"^[가-힯]+$")
+
+
+def normalize_symbol(s: str) -> str:
+    """NFKD-normalize so math-italic chars (𝛼, 𝐴, 𝑎) collapse to plain (α, A, a)."""
+    return unicodedata.normalize("NFKD", s)
+
+
+def extract_equation_variables(omath_el) -> list[str]:
+    """Identifier tokens (variable names) inside one <m:oMath> element,
+    in first-occurrence order, deduplicated.
+
+    Filters operators, numbers, Hangul labels, and well-known math function
+    names (sin, log, …). The returned strings are kept in their original form
+    (not normalized) for display purposes; matching against legend symbols
+    should use ``normalize_symbol`` on both sides.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for el in omath_el.iter():
+        local = el.tag.split("}")[-1] if "}" in el.tag else el.tag
+        if local != "t" or not el.text:
+            continue
+        for tok in _ALPHA_RUN_RE.findall(el.text):
+            if _HANGUL_ONLY_RE.match(tok):
+                continue
+            if normalize_symbol(tok).lower() in _FUNC_NAMES:
+                continue
+            if tok in seen:
+                continue
+            seen.add(tok)
+            result.append(tok)
+    return result
+
+
+def equations_in_paragraph(para) -> list:
+    """All top-level <m:oMath> elements inside a paragraph."""
+    return _top_level_math_elements(para)
 
 
 # ---------------------------------------------------------------------------

@@ -3,15 +3,20 @@
 Builds an in-memory docx with one claim shaped like:
     [claim header]
     [intro text] 다음 식들을 만족한다:
-    [eq1]  (Word OMML)
-    [eq2]  (Word OMML)
-    [eq3]  (Word OMML)
+    [eq1]  (centered Word OMML)
+    [eq2]  (centered)
+    [eq3]  (centered)
     [legend text] 여기서, A는 ..., B는 ..., X는 ..., Y는 ..., M은 ..., N은 ...
 
-Runs the agent graph with a stub LLM that returns interleaved output:
-    intro + [EQUATION_1] desc1 + [EQUATION_2] desc2 + [EQUATION_3] desc3
-and verifies the rendered docx places each description IMMEDIATELY after
-its own equation paragraph (not at the legend, not all bunched at the end).
+For each of three stubbed LLM behaviors, runs the full agent graph and prints
+the rendered docx paragraph-by-paragraph so we can verify each parameter
+clause ends up adjacent to its OWN equation:
+
+  1. interleaved   — LLM produced eq1+legend1, eq2+legend2, eq3+legend3.
+  2. grouped       — LLM bunched all clauses after the last marker.
+                     Variable-aware redistribution should rescue this.
+  3. respectively  — LLM emitted 'A, B, ..., are X, Y, ..., respectively'.
+                     postprocess() expands, then redistribution places.
 
 Run:
     uv run python scripts/test_grouped_eq_layout.py
@@ -28,8 +33,8 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from docx import Document  # noqa: E402
+from docx.enum.text import WD_ALIGN_PARAGRAPH  # noqa: E402
 from docx.oxml import OxmlElement  # noqa: E402
-from docx.oxml.ns import qn  # noqa: E402
 
 from translate.agent.graph import build_graph  # noqa: E402
 from translate.agent.state import TranslationState  # noqa: E402
@@ -44,7 +49,6 @@ def _math_run(text: str):
 
 
 def _add_equation_paragraph(doc, *tokens: str):
-    """Add a paragraph that contains only one inline <m:oMath> equation."""
     p = doc.add_paragraph()
     omath = OxmlElement("m:oMath")
     for tok in tokens:
@@ -54,23 +58,17 @@ def _add_equation_paragraph(doc, *tokens: str):
 
 
 def make_input_docx(path: Path) -> None:
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-
     doc = Document()
     doc.add_paragraph("[청구범위]")
     doc.add_paragraph("[청구항 1]")
-    doc.add_paragraph(
-        "반도체 장치로서, 다음 식들을 만족하는 반도체 장치:"
-    )
-    # Centered equation paragraphs — mirrors how Word stores [수학식 N].
-    for eq_tokens in [
+    doc.add_paragraph("반도체 장치로서, 다음 식들을 만족하는 반도체 장치:")
+    for tokens in [
         ("A", " = ", "B", " + ", "C"),
         ("X", " = ", "Y", " × ", "Z"),
         ("M", " = ", "N", " - ", "P"),
     ]:
-        p = _add_equation_paragraph(doc, *eq_tokens)
+        p = _add_equation_paragraph(doc, *tokens)
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    # Legend paragraph — left-aligned by default.
     doc.add_paragraph(
         "여기서, A는 두께이고, B는 폭이고, C는 높이이고, "
         "X는 길이이고, Y는 면적이고, Z는 밀도이고, "
@@ -79,37 +77,34 @@ def make_input_docx(path: Path) -> None:
     doc.save(path)
 
 
-# Stub returns the LLM-translation we hope a well-instructed model produces:
-# interleaved equation + per-equation legend.
-GOOD_CLAIM = (
+# Three LLM behaviors — same input, very different output shapes:
+INTERLEAVED = (
     "A semiconductor device satisfying:\n"
     "[EQUATION_1], where A is a thickness, B is a width, and C is a height;\n"
     "[EQUATION_2], where X is a length, Y is an area, and Z is a density; and\n"
     "[EQUATION_3], where M is a mass, N is a volume, and P is a pressure."
 )
+GROUPED = (
+    "A semiconductor device satisfying:\n"
+    "[EQUATION_1] [EQUATION_2] [EQUATION_3] where "
+    "A is a thickness, B is a width, C is a height, "
+    "X is a length, Y is an area, Z is a density, "
+    "M is a mass, N is a volume, and P is a pressure."
+)
+RESPECTIVELY = (
+    "A semiconductor device satisfying:\n"
+    "[EQUATION_1] [EQUATION_2] [EQUATION_3] where "
+    "A, B, C, X, Y, Z, M, N, P are a thickness, a width, a height, "
+    "a length, an area, a density, a mass, a volume, and a pressure, respectively."
+)
 
 
 class StubClient:
+    def __init__(self, response_text: str):
+        self.response_text = response_text
+
     def complete(self, messages):
-        # Print the user prompt so we can verify the GROUPED-EQUATION
-        # LAYOUT REPAIR instruction was actually injected.
-        user = messages[1]["content"]
-        if "GROUPED-EQUATION LAYOUT REPAIR" in user:
-            print("[stub] user prompt contains layout-repair instruction ✓")
-        else:
-            print("[stub] user prompt MISSING layout-repair instruction ✗")
-        if all(
-            item in user
-            for item in (
-                "[EQUATION_1]: A = B + C",
-                "[EQUATION_2]: X = Y × Z",
-                "[EQUATION_3]: M = N - P",
-            )
-        ):
-            print("[stub] user prompt contains equation formula context ✓")
-        else:
-            print("[stub] user prompt MISSING equation formula context ✗")
-        return json.dumps({"text": GOOD_CLAIM, "key_terms": []})
+        return json.dumps({"text": self.response_text, "key_terms": []})
 
 
 def _alignment_of(p) -> str:
@@ -122,9 +117,9 @@ def _alignment_of(p) -> str:
     return jc.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val") or "default"
 
 
-def inspect(path: Path) -> None:
+def inspect(path: Path, label: str) -> None:
     doc = Document(path)
-    print(f"\n=== Output paragraphs of {path.name} ===")
+    print(f"\n=== {label} → {path.name} ===")
     for i, p in enumerate(doc.paragraphs):
         seq = []
         for el in p._p.iter():
@@ -136,16 +131,9 @@ def inspect(path: Path) -> None:
         print(f"[{i}] align={_alignment_of(p):<7s} {' | '.join(seq) if seq else '(blank)'}")
 
 
-def main() -> None:
-    src = Path("data/sample_grouped_eq.docx")
-    dst = Path("output/sample_grouped_eq_en.docx")
-    src.parent.mkdir(parents=True, exist_ok=True)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    make_input_docx(src)
-
+def run_one(label: str, response: str, src: Path, dst: Path) -> None:
     if dst.exists():
         dst.unlink()
-
     initial: TranslationState = {
         "input_path": src,
         "output_path": dst,
@@ -153,10 +141,24 @@ def main() -> None:
         "review": False,
         "verbose": False,
         "delay": 0.0,
-        "client": StubClient(),
+        "client": StubClient(response),
     }
     build_graph().invoke(initial)
-    inspect(dst)
+    inspect(dst, label)
+
+
+def main() -> None:
+    src = Path("data/sample_grouped_eq.docx")
+    src.parent.mkdir(parents=True, exist_ok=True)
+    Path("output").mkdir(parents=True, exist_ok=True)
+    make_input_docx(src)
+
+    run_one("INTERLEAVED  ",  INTERLEAVED,
+            src, Path("output/sample_eq_interleaved.docx"))
+    run_one("GROUPED      ",  GROUPED,
+            src, Path("output/sample_eq_grouped.docx"))
+    run_one("RESPECTIVELY ",  RESPECTIVELY,
+            src, Path("output/sample_eq_respectively.docx"))
 
 
 if __name__ == "__main__":
