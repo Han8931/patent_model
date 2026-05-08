@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from ..prompt import (
     CLAIM_PROMPT_BY_KIND,
     PROMPT_ABSTRACT,
@@ -20,6 +22,57 @@ from .claim_classifier import (
 from .glossary import format_for_prompt
 
 
+_EQUATION_TOKEN_RE = re.compile(r'\[EQUATION_\d+\]')
+_HANGUL_RUN_RE = re.compile(r'[가-힯]{3,}')
+
+
+def _has_combined_legend_pattern(chunk_text: str) -> bool:
+    """True when the source has N>=2 equation markers grouped together
+    (no Korean text between them) followed by a single combined parameter
+    legend ('여기서, A는 …, B는 …, X는 …').
+
+    Example pattern (from a claim):
+        다음 식들을 만족한다:
+        [EQUATION_1]
+        [EQUATION_2]
+        [EQUATION_3]
+        여기서, A는 ..., B는 ..., X는 ..., Y는 ..., M은 ..., N은 ...
+
+    Without intervention the LLM faithfully copies this layout — equations
+    grouped, then one big legend. Detect it and tell the model to split the
+    legend so each equation is followed only by the parameters it actually
+    contains.
+    """
+    matches = list(_EQUATION_TOKEN_RE.finditer(chunk_text))
+    if len(matches) < 2:
+        return False
+    for a, b in zip(matches, matches[1:]):
+        between = chunk_text[a.end():b.start()]
+        if _HANGUL_RUN_RE.search(between):
+            return False  # already separated by Korean text — not combined
+    after_last = chunk_text[matches[-1].end():]
+    return bool(_HANGUL_RUN_RE.search(after_last))
+
+
+_COMBINED_LEGEND_INSTRUCTION = (
+    "\n"
+    "GROUPED-EQUATION LAYOUT REPAIR (this source matches the pattern):\n"
+    "- The Korean source places multiple [EQUATION_N] markers consecutively\n"
+    "  and then a SINGLE combined parameter legend (e.g. '여기서, A는 ..., B는\n"
+    "  ..., X는 ..., Y는 ...') that lists parameters from several equations.\n"
+    "- DO NOT copy that layout verbatim. Instead, SPLIT the legend so that\n"
+    "  each [EQUATION_N] marker is IMMEDIATELY followed by ONLY the parameter\n"
+    "  clauses that actually appear in that equation.\n"
+    "- Required output shape:\n"
+    "    [EQUATION_1] where <params used in EQ1> ;\n"
+    "    [EQUATION_2] where <params used in EQ2> ;\n"
+    "    [EQUATION_3] where <params used in EQ3> .\n"
+    "- Use the actual variable names in each equation to decide which\n"
+    "  parameters belong to it. Translate every '<symbol>는/은 ...' clause\n"
+    "  in the source — none may be dropped.\n"
+)
+
+
 def _system_with_glossary(prompt: Prompt, glossary: dict[str, str]) -> str:
     """Inject the rolling glossary into the system message."""
     block = format_for_prompt(glossary)
@@ -36,6 +89,10 @@ def _system_with_glossary(prompt: Prompt, glossary: dict[str, str]) -> str:
 
 def build_body_messages(chunk_text: str, glossary: dict[str, str]) -> list[dict]:
     system = _system_with_glossary(PROMPT_BODY, glossary)
+    layout_repair = (
+        _COMBINED_LEGEND_INSTRUCTION
+        if _has_combined_legend_pattern(chunk_text) else ""
+    )
     user = (
         "Translate the following Korean patent text into English (USPTO style).\n"
         "Render the entire text as ONE coherent English paragraph.\n"
@@ -45,6 +102,7 @@ def build_body_messages(chunk_text: str, glossary: dict[str, str]) -> list[dict]
         "  must alternate the SAME way: e.g. '[EQUATION_1] + its description, then [EQUATION_2] +\n"
         "  its description.' NEVER output '[EQUATION_1] [EQUATION_2] description1 description2'.\n"
         "- Emit exactly the same number of [EQUATION_N] tokens as the input.\n"
+        f"{layout_repair}"
         "Output JSON ONLY in this schema:\n"
         '{"text": "<English translation>", "key_terms": [{"ko": "<Korean term>", "en": "<English term>"}]}\n'
         "key_terms must list significant technical noun phrases you translated (components, materials, processes).\n"
@@ -99,10 +157,15 @@ _SHARED_CLAIM_RULES = (
 
 
 def _independent_user_prompt(claim_num: int, kind: ClaimKind, chunk_text: str) -> str:
+    layout_repair = (
+        _COMBINED_LEGEND_INSTRUCTION
+        if _has_combined_legend_pattern(chunk_text) else ""
+    )
     return (
         f"Translate Korean claim {claim_num} (INDEPENDENT, kind={kind}) into ONE coherent English claim sentence.\n"
         "Use the kind-specific PREAMBLE template and ELEMENT GRAMMAR from the system message.\n"
         + _SHARED_CLAIM_RULES
+        + layout_repair
         + "\n"
         "Output JSON ONLY:\n"
         '{"text": "<English claim sentence>", "key_terms": [{"ko": "...", "en": "..."}]}\n'
@@ -140,6 +203,10 @@ def _dependent_user_prompt(
     else:  # device, system
         opener = f"'{preamble}, wherein <limitation> ...'"
 
+    layout_repair = (
+        _COMBINED_LEGEND_INSTRUCTION
+        if _has_combined_legend_pattern(chunk_text) else ""
+    )
     return (
         f"Translate Korean claim {claim_num} (DEPENDENT, kind={kind}, "
         f"depends on {format_parent_reference(parent_claim_nums, multi_parent_kind)}) "
@@ -152,6 +219,7 @@ def _dependent_user_prompt(
         "or 'in accordance with'.\n"
         "\n"
         + _SHARED_CLAIM_RULES
+        + layout_repair
         + "\n"
         "Output JSON ONLY:\n"
         '{"text": "<English claim sentence>", "key_terms": [{"ko": "...", "en": "..."}]}\n'

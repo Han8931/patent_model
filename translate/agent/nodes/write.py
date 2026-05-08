@@ -27,19 +27,39 @@ def _claim_equation_indices(chunk: Chunk, records) -> list[int]:
     ]
 
 
-def _next_text_paragraph_index(
+def _immediate_next_text_paragraph_index(
     chunk: Chunk,
     records,
     after_idx: int,
     used: set[int],
     equation_indices: set[int],
 ) -> int | None:
-    for idx in chunk.paragraph_indices:
-        if idx <= after_idx or idx in used or idx in equation_indices:
-            continue
-        if not has_non_text_content(records[idx].para):
-            return idx
-    return None
+    """Return the chunk paragraph that comes IMMEDIATELY after ``after_idx``,
+    only if it is an unused text paragraph.
+
+    Why "immediately": for a claim shaped like
+        [head] : [eq1] [eq2] [eq3] [legend]
+    the legend is the first text paragraph after eq1, but it really belongs
+    to eqN — sending desc1 to it would land far away from eq1. By restricting
+    to the chunk's *next* index, we send descriptions to a sibling text
+    paragraph only when one is actually adjacent (e.g. eq1 then legend1 in a
+    paired layout); otherwise we leave the slot empty so the caller can
+    insert_para_after eq_idx and place the description right next to its
+    equation.
+    """
+    indices = chunk.paragraph_indices
+    try:
+        pos = indices.index(after_idx)
+    except ValueError:
+        return None
+    if pos + 1 >= len(indices):
+        return None
+    nxt = indices[pos + 1]
+    if nxt in used or nxt in equation_indices:
+        return None
+    if has_non_text_content(records[nxt].para):
+        return None
+    return nxt
 
 
 def _apply_claim_with_equations(chunk: Chunk, records, font: str) -> bool:
@@ -74,7 +94,7 @@ def _apply_claim_with_equations(chunk: Chunk, records, font: str) -> bool:
         if not segment:
             continue
 
-        target_idx = _next_text_paragraph_index(
+        target_idx = _immediate_next_text_paragraph_index(
             chunk, records, eq_idx, used_text_indices, equation_set
         )
         if target_idx is None:
