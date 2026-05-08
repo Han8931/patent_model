@@ -164,6 +164,8 @@ PROMPT_BODY = register_prompt(Prompt(
         "- A parameter legend immediately following an equation ('여기서, A는 ..., B는 ...,') describes\n"
         "  THAT equation only — keep it adjacent to the same marker. Translate every '<symbol>는/은 ...'\n"
         "  item; do not merge, drop, or summarize.\n"
+        "  BAD : 'α, β, and γ are X, Y, and Z, respectively.'\n"
+        "  GOOD: 'α is X; β is Y; γ is Z.'\n"
         "- The number of [EQUATION_N] tokens you emit MUST equal the number you received.\n"
     ),
 ))
@@ -205,6 +207,8 @@ _CLAIMS_BASE_RULES = (
     "- Translate EVERY parameter description. The output must contain one clause for each\n"
     "  '<symbol>는/은 ...' item in the source. Do not merge multiple parameters into one\n"
     "  clause and do not drop any. If the source lists 5 parameters, output 5 clauses.\n"
+    "- Never render parameter legends in comma-list/respectively form. Use one symbol-description\n"
+    "  clause per parameter: 'α is ...; β is ...; γ is ...'.\n"
     "\n"
     "FORMATTING:\n"
     "- After ':' and after each ';', insert a newline to list elements on separate lines.\n"

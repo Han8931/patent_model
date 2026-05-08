@@ -165,6 +165,8 @@ _SHARED_CLAIM_RULES = (
     "- Translate every parameter description that follows an equation (e.g. '여기서, A는 ...,\n"
     "  B는 ..., C는 ...'). Output one clause per parameter — do not merge, drop, or\n"
     "  summarize any of them.\n"
+    "- Never render parameter legends in comma-list/respectively form. Use one symbol-description\n"
+    "  clause per parameter: 'α is ...; β is ...; γ is ...'.\n"
 )
 
 

@@ -357,7 +357,7 @@ def _break_after_semicolons(text: str) -> str:
 #   - the symbol list is clearly math-like (short identifiers / Greek letters),
 #   - each value is a simple noun phrase with no internal commas or semicolons,
 #   - the symbol count and value count match,
-#   - the trailing word is the literal 'respectively' (with optional comma).
+#   - the word 'respectively' is either after the value list or before the verb.
 # Anything fancier is left alone — better to skip a repair than to mangle text.
 
 # Identifier shape: 1–10 chars, starts with a letter (ASCII or Greek), allows
@@ -365,23 +365,52 @@ def _break_after_semicolons(text: str) -> str:
 _SYM = r'[A-Za-zΑ-Ωα-ω][A-Za-z0-9Α-Ωα-ω₀-₉_\']{0,9}'
 _VAL = r"[^,;.]+"
 
-_RESPECTIVELY_RE = re.compile(
+_VERB = (
+    r'are|denote|denotes|represent|represents|stand\s+for|stands\s+for|'
+    r'indicate|indicates|mean|means|refer\s+to|refers\s+to|'
+    r'correspond\s+to|corresponds\s+to'
+)
+
+_RESPECTIVELY_AFTER_VALUES_RE = re.compile(
     rf'(?P<symbols>{_SYM}'
     rf'(?:\s*,\s*{_SYM}){{1,8}}'
     rf'(?:\s*,?\s*and\s+{_SYM})?)'
-    r'\s+(?P<verb>are|denote|represent|stand\s+for|indicate)\s+'
+    rf'\s+(?P<verb>{_VERB})\s+'
     rf'(?P<values>{_VAL}'
     rf'(?:\s*,\s*{_VAL}){{1,8}}'
     rf'(?:\s*,?\s*and\s+{_VAL})?)'
     r'\s*,?\s*respectively',
+    flags=re.IGNORECASE,
+)
+
+_RESPECTIVELY_BEFORE_VERB_RE = re.compile(
+    rf'(?P<symbols>{_SYM}'
+    rf'(?:\s*,\s*{_SYM}){{1,8}}'
+    rf'(?:\s*,?\s*and\s+{_SYM})?)'
+    r'\s+respectively\s+'
+    rf'(?P<verb>{_VERB})\s+'
+    rf'(?P<values>{_VAL}'
+    rf'(?:\s*,\s*{_VAL}){{1,8}}'
+    rf'(?:\s*,?\s*and\s+{_VAL})?)',
+    flags=re.IGNORECASE,
 )
 
 _VERB_SINGULAR = {
     "are": "is",
     "denote": "denotes",
+    "denotes": "denotes",
     "represent": "represents",
+    "represents": "represents",
     "stand for": "stands for",
+    "stands for": "stands for",
     "indicate": "indicates",
+    "indicates": "indicates",
+    "mean": "means",
+    "means": "means",
+    "refer to": "refers to",
+    "refers to": "refers to",
+    "correspond to": "corresponds to",
+    "corresponds to": "corresponds to",
 }
 
 
@@ -401,7 +430,8 @@ def _expand_respectively(text: str) -> str:
         clauses = [f"{s} {singular} {v}" for s, v in zip(symbols, values)]
         return "; ".join(clauses)
 
-    return _RESPECTIVELY_RE.sub(repl, text)
+    text = _RESPECTIVELY_AFTER_VALUES_RE.sub(repl, text)
+    return _RESPECTIVELY_BEFORE_VERB_RE.sub(repl, text)
 
 
 def postprocess(text: str) -> str:
