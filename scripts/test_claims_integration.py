@@ -73,6 +73,9 @@ RECORDS = [
 
     _record(17, "[청구항 9]", kind="claim_header", claim_num=9),
     _record(18, "청구항 8에 있어서, 상기 명령어들은 추가로 ...", claim_num=9),
+
+    _record(19, "[청구항 10]", kind="claim_header", claim_num=10),
+    _record(20, "청구항 2에 있어서, 상기 반도체 장치는 봉지재를 더 포함하는 반도체 장치.", claim_num=10),
 ]
 
 
@@ -129,6 +132,9 @@ class StubClient:
             7: "The semiconductor device of any one of claims 1 to 5, wherein the insulating layer has a thickness of 5 nm or less.",
             8: "A non-transitory computer-readable medium storing instructions that, when executed by a processor, cause the processor to perform operations.",
             9: "The non-transitory computer-readable medium of claim 8, wherein the instructions further cause the processor to validate inputs.",
+            # Deliberately wrong independent-style output. translate_claims
+            # should enforce 'The semiconductor device of claim 2, wherein ...'
+            10: "A semiconductor device comprising: an encapsulant.",
         }
         return json.dumps({"text": responses[num], "key_terms": []})
 

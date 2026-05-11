@@ -23,6 +23,7 @@ import time
 
 from ..claim_classifier import (
     PreambleSpec,
+    build_dependent_preamble,
     extract_preamble,
     method_dependent_connective,
 )
@@ -59,6 +60,60 @@ def _enforce_independent_preamble(text: str, planned: str | None) -> str:
     return planned + text[match.end():]
 
 
+def _dependent_opening(
+    chunk: Chunk,
+    parent_spec: PreambleSpec | None,
+    method_connective: str,
+) -> str | None:
+    if parent_spec is None or not chunk.parent_claim_nums:
+        return None
+    preamble = build_dependent_preamble(
+        parent_spec,
+        chunk.parent_claim_nums,
+        chunk.multi_parent_kind,
+    )
+    if chunk.claim_kind == "method" and method_connective == "further comprising":
+        return f"{preamble}, further comprising"
+    return f"{preamble}, wherein"
+
+
+def _enforce_dependent_preamble(text: str, required: str | None) -> str:
+    """Ensure a dependent claim keeps its claim-reference opening.
+
+    LLMs occasionally rewrite dependents as independent claims
+    ("A semiconductor package comprising:"). When we have a parent-derived
+    opening, replace any independent-style opening through the first ':' or
+    comma with the required dependent opening.
+    """
+    if not required:
+        return text
+    text = text.strip()
+    required = required.strip()
+    if not text:
+        return text
+    if text.lower().startswith(required.lower()):
+        return required + text[len(required):]
+
+    independent = re.match(r'^A[n]?\s+[^:\n]{1,220}:\s*', text)
+    if independent:
+        if required.lower().endswith(", wherein"):
+            noun_match = re.match(r'^The\s+(.+?)\s+of\s+', required)
+            if noun_match:
+                noun = noun_match.group(1)
+                return (
+                    required
+                    + f" the {noun} comprises "
+                    + text[independent.end():].lstrip()
+                )
+        return required + " " + text[independent.end():].lstrip()
+
+    dependent = re.match(r'^The\s+[^,\n]{1,220},\s*(?:wherein|further\s+comprising)\b\s*', text, re.IGNORECASE)
+    if dependent:
+        return required + " " + text[dependent.end():].lstrip()
+
+    return required + " " + text
+
+
 def _translate_one(
     chunk: Chunk,
     *,
@@ -71,6 +126,9 @@ def _translate_one(
     method_connective = "wherein"
     if chunk.claim_kind == "method" and not chunk.is_independent:
         method_connective = method_dependent_connective(chunk.text)
+    required_dependent_opening = _dependent_opening(
+        chunk, parent_spec, method_connective
+    )
 
     try:
         messages = build_claim_messages(
@@ -93,6 +151,10 @@ def _translate_one(
             if chunk.is_independent:
                 text = _enforce_independent_preamble(
                     text, chunk.independent_preamble
+                )
+            else:
+                text = _enforce_dependent_preamble(
+                    text, required_dependent_opening
                 )
             chunk.translation = postprocess(_format_translation(chunk.claim_num, text))
         else:
@@ -189,6 +251,16 @@ def translate_claims(state: TranslationState) -> dict:
         )
         if data is not None:
             merge_terms(glossary, data.get("key_terms") or [])
+
+        if parent_spec is not None:
+            chunk.noun_phrase = parent_spec.noun_phrase
+            chunk.actor_phrase = parent_spec.actor_phrase
+            preamble_specs[chunk.claim_num] = PreambleSpec(
+                claim_num=chunk.claim_num,
+                claim_kind=chunk.claim_kind or parent_spec.claim_kind,
+                noun_phrase=parent_spec.noun_phrase,
+                actor_phrase=parent_spec.actor_phrase,
+            )
 
         done += 1
         if done % 10 == 0 or done == total:
