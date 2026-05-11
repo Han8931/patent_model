@@ -27,7 +27,7 @@ from ..claim_classifier import (
     method_dependent_connective,
 )
 from ..docx_utils import postprocess
-from ..glossary import extract_json_block, merge_terms
+from ..glossary import clean_text, extract_json_block, merge_terms
 from ..prompts import build_claim_messages
 from ..sections import CLAIM_ELEMENT_CAP_RE, LLM_CLAIM_PREFIX_RE
 from ..state import Chunk, TranslationState
@@ -38,6 +38,25 @@ def _format_translation(claim_num: int, raw_text: str) -> str:
     text = LLM_CLAIM_PREFIX_RE.sub('', raw_text.strip())
     text = CLAIM_ELEMENT_CAP_RE.sub(lambda m: '\n' + m.group(1).lower(), text)
     return f"{claim_num}. {text}"
+
+
+def _enforce_independent_preamble(text: str, planned: str | None) -> str:
+    """Conservatively replace the opening preamble with the planned one.
+
+    The planner is responsible for semantic preamble selection. This function
+    only enforces the already-planned opening when the translation has a normal
+    claim preamble ending in ':' near the start.
+    """
+    if not planned:
+        return text
+    text = text.strip()
+    planned = planned.strip()
+    if not text or text.startswith(planned):
+        return text
+    match = re.match(r'^[A-Z][^:\n]{0,220}:', text)
+    if not match:
+        return text
+    return planned + text[match.end():]
 
 
 def _translate_one(
@@ -65,11 +84,24 @@ def _translate_one(
             multi_parent_kind=chunk.multi_parent_kind,
             method_connective=method_connective,
             equation_context=chunk.equation_context,
+            independent_preamble=chunk.independent_preamble,
         )
         raw = client.complete(messages)
         data = extract_json_block(raw) or {}
-        text = (data.get("text") or "").strip() or raw.strip()
-        chunk.translation = postprocess(_format_translation(chunk.claim_num, text))
+        text = clean_text(data.get("text")) or clean_text(raw)
+        if text:
+            if chunk.is_independent:
+                text = _enforce_independent_preamble(
+                    text, chunk.independent_preamble
+                )
+            chunk.translation = postprocess(_format_translation(chunk.claim_num, text))
+        else:
+            if verbose:
+                print(
+                    f"  translate_claims claim {chunk.claim_num}: "
+                    "empty/placeholder output, keeping Korean"
+                )
+            chunk.translation = f"{chunk.claim_num}. {chunk.text}"
         return data
     except Exception as exc:
         if verbose:
@@ -116,12 +148,13 @@ def translate_claims(state: TranslationState) -> dict:
             body = re.sub(
                 rf'^{chunk.claim_num}\.\s*', '', chunk.translation, count=1
             )
-            noun, actor = extract_preamble(
-                body,
-                chunk.claim_kind or "device",
-                korean_source=chunk.text,
+            extracted_noun, extracted_actor = extract_preamble(
+                body, chunk.claim_kind or "device", korean_source=chunk.text
             )
+            noun = chunk.noun_phrase or extracted_noun
+            actor = chunk.actor_phrase or extracted_actor
             chunk.noun_phrase = noun
+            chunk.actor_phrase = actor
             preamble_specs[chunk.claim_num] = PreambleSpec(
                 claim_num=chunk.claim_num,
                 claim_kind=chunk.claim_kind or "device",

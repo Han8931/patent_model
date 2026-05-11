@@ -26,6 +26,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from translate.agent.nodes.chunk_claims import chunk_claims  # noqa: E402
+from translate.agent.nodes.plan_claim_preambles import plan_claim_preambles  # noqa: E402
 from translate.agent.nodes.translate_claims import translate_claims  # noqa: E402
 from translate.agent.state import ParagraphRecord  # noqa: E402
 
@@ -83,6 +84,37 @@ class StubClient:
 
     def complete(self, messages):
         user = messages[1]["content"]
+        if user.startswith("Plan the English preamble"):
+            head = user.split("\n", 1)[0]
+            num = int(head.split("claim ")[1].split(".")[0])
+            plans = {
+                1: {
+                    "korean_subject_span": "반도체 장치",
+                    "english_noun_phrase": "semiconductor device",
+                    "independent_preamble": "A semiconductor device comprising:",
+                    "actor_phrase": "",
+                    "confidence": "high",
+                },
+                3: {
+                    "korean_subject_span": "방법",
+                    "english_noun_phrase": "method",
+                    "independent_preamble": "A method of manufacturing a semiconductor device, the method comprising:",
+                    "actor_phrase": "",
+                    "confidence": "high",
+                },
+                8: {
+                    "korean_subject_span": "비일시적 컴퓨터 판독 가능 매체",
+                    "english_noun_phrase": "non-transitory computer-readable medium",
+                    "independent_preamble": (
+                        "A non-transitory computer-readable medium storing instructions that, "
+                        "when executed by a processor, cause the processor to:"
+                    ),
+                    "actor_phrase": "processor",
+                    "confidence": "high",
+                },
+            }
+            return json.dumps(plans[num])
+
         # Extract claim number from "Translate Korean claim N (..."
         head = user.split(" into ONE")[0]
         num = int(head.split("claim ")[1].split(" ")[0])
@@ -116,6 +148,7 @@ def main() -> None:
 
     stub = StubClient()
     state["client"] = stub
+    state.update(plan_claim_preambles(state))
     translate_claims(state)
 
     print("\n=== Call order observed by stub LLM ===")

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ..docx_utils import postprocess
-from ..glossary import extract_json_block, merge_terms
+from ..glossary import clean_text, extract_json_block, merge_terms
 from ..prompts import build_abstract_messages
 from ..state import TranslationState
 
@@ -23,8 +23,13 @@ def translate_abstract(state: TranslationState) -> dict:
     try:
         raw = client.complete(build_abstract_messages(chunk.text, glossary))
         data = extract_json_block(raw) or {}
-        text = (data.get("text") or "").strip() or raw.strip()
-        chunk.translation = postprocess(text)
+        text = clean_text(data.get("text")) or clean_text(raw)
+        if text:
+            chunk.translation = postprocess(text)
+        else:
+            if verbose:
+                print("  translate_abstract: empty/placeholder output, keeping Korean")
+            chunk.translation = chunk.text
         merge_terms(glossary, data.get("key_terms") or [])
     except Exception as exc:
         if verbose:

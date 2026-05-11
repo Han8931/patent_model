@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 
 from ..docx_utils import postprocess
-from ..glossary import extract_json_block, merge_terms
+from ..glossary import clean_text, extract_json_block, merge_terms
 from ..prompts import build_body_messages
 from ..state import TranslationState
 
@@ -33,10 +33,19 @@ def translate_body(state: TranslationState) -> dict:
                 )
             )
             data = extract_json_block(raw) or {}
-            text = (data.get("text") or "").strip()
+            text = clean_text(data.get("text"))
             if not text:
-                text = raw.strip()
-            chunk.translation = postprocess(text)
+                # Don't fall back to raw if the LLM just echoed our schema —
+                # writing '<English translation>' verbatim to the docx is worse
+                # than leaving the Korean visible.
+                fallback = clean_text(raw)
+                text = fallback
+            if text:
+                chunk.translation = postprocess(text)
+            else:
+                if verbose:
+                    print(f"  translate_body chunk {chunk.id}: empty/placeholder output, keeping Korean")
+                chunk.translation = chunk.text
             merge_terms(glossary, data.get("key_terms") or [])
         except Exception as exc:
             if verbose:

@@ -17,15 +17,23 @@ from .claim_classifier import (
     MultiParent,
     PreambleSpec,
     build_dependent_preamble,
-    extract_korean_subject_phrase,
     format_parent_reference,
-    korean_subject_to_english,
 )
 from .glossary import format_for_prompt
 
 
 _EQUATION_TOKEN_RE = re.compile(r'\[EQUATION_\d+\]')
 _HANGUL_RUN_RE = re.compile(r'[가-힯]{3,}')
+
+
+_PREAMBLE_PLANNER_SYSTEM = (
+    "You are a Korean-to-English patent claim preamble planner.\n"
+    "Do NOT translate the full claim. Identify the claim subject and produce\n"
+    "only the English preamble information needed for a USPTO-style claim.\n"
+    "Preserve technical qualifiers in the claim subject; do not replace a\n"
+    "specific subject with a generic word unless the Korean is itself generic.\n"
+    "Respond with valid JSON only.\n"
+)
 
 
 def _has_combined_legend_pattern(chunk_text: str) -> bool:
@@ -123,6 +131,49 @@ def _format_equation_context(equation_context: dict[str, str] | None) -> str:
     return "\n".join(lines) + "\n"
 
 
+def build_preamble_plan_messages(
+    *,
+    claim_num: int,
+    chunk_text: str,
+    kind: ClaimKind,
+    glossary: dict[str, str],
+) -> list[dict]:
+    glossary_block = format_for_prompt(glossary)
+    user = (
+        f"Plan the English preamble for Korean independent claim {claim_num}.\n"
+        f"Detected claim kind: {kind}\n"
+        "\n"
+        "Return JSON ONLY in this schema:\n"
+        "{"
+        '"korean_subject_span": "<Korean words that name the claimed subject>", '
+        '"english_noun_phrase": "<English noun phrase for dependent preambles>", '
+        '"independent_preamble": "<exact English independent-claim opening>", '
+        '"actor_phrase": "<actor phrase for CRM/system, or empty string>", '
+        '"confidence": "high|medium|low"'
+        "}\n"
+        "\n"
+        "Rules:\n"
+        "- For device/circuit/module/system-style claims, the independent preamble usually starts\n"
+        "  'A <english_noun_phrase> comprising:'.\n"
+        "- For method claims, use either 'A method comprising:' or\n"
+        "  'A method of <gerund object>, the method comprising:'. The dependent noun phrase is 'method'.\n"
+        "- For non-transitory computer-readable medium claims, use the standard CRM preamble and\n"
+        "  identify the actor phrase, e.g. 'processor' or 'one or more processors'.\n"
+        "- Do not use 'apparatus' unless the Korean subject specifically requires it.\n"
+        "- Do not add limitations from the body of the claim into the noun phrase.\n"
+        "- Reuse glossary terms where applicable.\n"
+        "\n"
+        f"Glossary:\n{glossary_block}\n"
+        "\n"
+        "Korean claim:\n"
+        f"{chunk_text}\n"
+    )
+    return [
+        {"role": "system", "content": _PREAMBLE_PLANNER_SYSTEM},
+        {"role": "user", "content": user},
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Body — translate one chunk per call (chunk may span multiple paragraphs joined with \n)
 # ---------------------------------------------------------------------------
@@ -192,48 +243,57 @@ _SHARED_CLAIM_RULES = (
     "- Place ';' between elements; insert a newline after each ';' and after each ':'.\n"
     "- Use lowercase after ':', ';', and 'wherein' (unless a proper noun).\n"
     "- Do NOT prepend the claim number — numbering is added separately.\n"
-    "- If [EQUATION] or a numbered marker such as [EQUATION_1] appears, keep the marker\n"
-    "  verbatim in the same source order and relative position.\n"
-    "- Preserve equation layout as much as possible. If the source alternates equation +\n"
-    "  description, equation + description, translate in that same alternating order;\n"
-    "  do not move all equations before all descriptions.\n"
-    "- Translate every parameter description that follows an equation (e.g. '여기서, A는 ...,\n"
-    "  B는 ..., C는 ...'). Output one clause per parameter — do not merge, drop, or\n"
-    "  summarize any of them.\n"
-    "- Never render parameter legends in comma-list/respectively form. Use one symbol-description\n"
-    "  clause per parameter: 'α is ...; β is ...; γ is ...'.\n"
-    "- Every parameter clause must explicitly begin with the symbol it describes. NEVER write\n"
-    "  malformed clauses like 'wherein is ...' or '<symbol1> <symbol2> <symbol3>, μ is ...'.\n"
 )
 
 
-def _subject_hint_block(chunk_text: str, kind: ClaimKind) -> str:
-    """Pull the trailing Korean subject ('…을 포함하는 X') and tell the LLM
-    what English noun phrase to use in the preamble. Empty string when no
-    hint can be derived or the kind doesn't take a noun-phrase preamble.
-    """
-    if kind != "device":
+def _has_equation_context(chunk_text: str, equation_context: dict[str, str] | None) -> bool:
+    return bool(equation_context) or bool(_EQUATION_TOKEN_RE.search(chunk_text))
+
+
+def _has_parameter_legend(chunk_text: str) -> bool:
+    return (
+        "여기서" in chunk_text
+        or "각각" in chunk_text
+        or bool(re.search(r'[A-Za-zΑ-Ωα-ω][A-Za-z0-9Α-Ωα-ω₀-₉_\']{0,12}\s*(?:는|은)', chunk_text))
+    )
+
+
+def _claim_equation_rules(
+    chunk_text: str,
+    equation_context: dict[str, str] | None,
+) -> str:
+    if not _has_equation_context(chunk_text, equation_context):
         return ""
-    ko_subject = extract_korean_subject_phrase(chunk_text)
-    if not ko_subject:
-        return ""
-    en_hint = korean_subject_to_english(chunk_text)
-    if en_hint:
-        return (
-            "\n"
-            f"PREAMBLE NOUN PHRASE — use this exact English phrase: '{en_hint}'.\n"
-            f"  (Derived from the trailing Korean subject '{ko_subject}'.)\n"
-            "  Independent: 'A " + en_hint + " comprising:'\n"
-            "  Dependents will say 'The " + en_hint + " of claim N, wherein …'.\n"
-            "  Do NOT use the word 'apparatus'.\n"
+    rules = (
+        "\n"
+        "EQUATION RULES FOR THIS CLAIM:\n"
+        "- If [EQUATION] or a numbered marker such as [EQUATION_1] appears, keep the marker\n"
+        "  verbatim in the same source order and relative position.\n"
+        "- Preserve equation layout as much as possible. If the source alternates equation +\n"
+        "  description, equation + description, translate in that same alternating order;\n"
+        "  do not move all equations before all descriptions.\n"
+    )
+    if _has_parameter_legend(chunk_text) or _has_combined_legend_pattern(chunk_text):
+        rules += (
+            "- Translate every parameter description that follows an equation (e.g. '여기서, A는 ...,\n"
+            "  B는 ..., C는 ...'). Output one clause per parameter — do not merge, drop, or\n"
+            "  summarize any of them.\n"
+            "- Never render parameter legends in comma-list/respectively form. Use one symbol-description\n"
+            "  clause per parameter: 'α is ...; β is ...; γ is ...'.\n"
+            "- Every parameter clause must explicitly begin with the symbol it describes. NEVER write\n"
+            "  malformed clauses like 'wherein is ...' or '<symbol1> <symbol2> <symbol3>, μ is ...'.\n"
         )
-    # No deterministic translation — still ban 'apparatus' and tell the LLM to
-    # translate the Korean subject phrase carefully.
+    return rules
+
+
+def _independent_preamble_lock(independent_preamble: str | None) -> str:
+    if not independent_preamble:
+        return ""
     return (
         "\n"
-        f"PREAMBLE SUBJECT — translate this Korean noun phrase faithfully and\n"
-        f"  use it as the preamble noun: '{ko_subject}'. Do NOT use the generic\n"
-        "  word 'apparatus'.\n"
+        f"PREAMBLE LOCK — begin the English claim EXACTLY with: '{independent_preamble}'\n"
+        "- This preamble was planned from the Korean claim subject. Do not substitute a generic\n"
+        "  noun such as 'apparatus' and do not add limitations to the preamble noun phrase.\n"
     )
 
 
@@ -242,6 +302,7 @@ def _independent_user_prompt(
     kind: ClaimKind,
     chunk_text: str,
     equation_context: dict[str, str] | None = None,
+    independent_preamble: str | None = None,
 ) -> str:
     layout_repair = (
         _COMBINED_LEGEND_INSTRUCTION
@@ -251,7 +312,8 @@ def _independent_user_prompt(
         f"Translate Korean claim {claim_num} (INDEPENDENT, kind={kind}) into ONE coherent English claim sentence.\n"
         "Use the kind-specific PREAMBLE template and ELEMENT GRAMMAR from the system message.\n"
         + _SHARED_CLAIM_RULES
-        + _subject_hint_block(chunk_text, kind)
+        + _independent_preamble_lock(independent_preamble)
+        + _claim_equation_rules(chunk_text, equation_context)
         + layout_repair
         + _format_equation_context(equation_context)
         + "\n"
@@ -308,6 +370,7 @@ def _dependent_user_prompt(
         "or 'in accordance with'.\n"
         "\n"
         + _SHARED_CLAIM_RULES
+        + _claim_equation_rules(chunk_text, equation_context)
         + layout_repair
         + _format_equation_context(equation_context)
         + "\n"
@@ -331,6 +394,7 @@ def build_claim_messages(
     multi_parent_kind: MultiParent = "single",
     method_connective: str = "wherein",
     equation_context: dict[str, str] | None = None,
+    independent_preamble: str | None = None,
 ) -> list[dict]:
     """Build messages for one claim translation call.
 
@@ -345,7 +409,7 @@ def build_claim_messages(
 
     if is_independent or parent_spec is None or not parent_claim_nums:
         user = _independent_user_prompt(
-            claim_num, kind, chunk_text, equation_context
+            claim_num, kind, chunk_text, equation_context, independent_preamble
         )
     else:
         user = _dependent_user_prompt(

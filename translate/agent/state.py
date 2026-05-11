@@ -50,6 +50,9 @@ class Chunk:
     # Filled after the LLM translates the parent independent claim;
     # consumed when its dependents are translated in phase 2.
     noun_phrase: str | None = None
+    actor_phrase: str | None = None
+    independent_preamble: str | None = None
+    korean_subject_span: str | None = None
 
 
 class TranslationState(TypedDict, total=False):
