@@ -13,6 +13,11 @@ _JSON_RE = re.compile(r'(\{.*\}|\[.*\])', re.DOTALL)
 # instead of filling it in, these strings come back as if they were real
 # translations. We treat them as empty so callers fall back to the failure path.
 _PLACEHOLDER_LITERAL_RE = re.compile(r'^\s*<[^<>]+>\s*$')
+_JSONISH_RESPONSE_RE = re.compile(
+    r'^\s*(?:```(?:json)?\s*)?[\{\[]|"\s*(?:text|key_terms)\s*"|'
+    r'\b(?:text|key_terms)\s*:',
+    re.IGNORECASE | re.DOTALL,
+)
 
 _PLACEHOLDER_LITERALS = frozenset({
     "<english translation>",
@@ -48,6 +53,16 @@ def clean_text(value: str | None) -> str:
     if value is None:
         return ""
     return "" if is_placeholder_value(value) else value.strip()
+
+
+def clean_translation_text(value: str | None) -> str:
+    """Return only plain translated text, never schema/JSON payload text."""
+    text = clean_text(value)
+    if not text:
+        return ""
+    if _JSONISH_RESPONSE_RE.search(text):
+        return ""
+    return text
 
 
 def extract_json_block(text: str):

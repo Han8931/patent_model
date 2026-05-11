@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ..docx_utils import postprocess
-from ..glossary import clean_text, extract_json_block, merge_terms
+from ..glossary import clean_translation_text, extract_json_block, merge_terms
 from ..prompts import build_abstract_messages
 from ..state import TranslationState
 
@@ -23,7 +23,7 @@ def translate_abstract(state: TranslationState) -> dict:
     try:
         raw = client.complete(build_abstract_messages(chunk.text, glossary))
         data = extract_json_block(raw) or {}
-        text = clean_text(data.get("text")) or clean_text(raw)
+        text = clean_translation_text(data.get("text")) or clean_translation_text(raw)
         if text:
             chunk.translation = postprocess(text)
         else:

@@ -28,7 +28,7 @@ from ..claim_classifier import (
     method_dependent_connective,
 )
 from ..docx_utils import postprocess
-from ..glossary import clean_text, extract_json_block, merge_terms
+from ..glossary import clean_translation_text, extract_json_block, merge_terms
 from ..prompts import build_claim_messages
 from ..sections import CLAIM_ELEMENT_CAP_RE, LLM_CLAIM_PREFIX_RE
 from ..state import Chunk, TranslationState
@@ -146,7 +146,7 @@ def _translate_one(
         )
         raw = client.complete(messages)
         data = extract_json_block(raw) or {}
-        text = clean_text(data.get("text")) or clean_text(raw)
+        text = clean_translation_text(data.get("text")) or clean_translation_text(raw)
         if text:
             if chunk.is_independent:
                 text = _enforce_independent_preamble(
