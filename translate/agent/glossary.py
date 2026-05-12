@@ -18,6 +18,14 @@ _JSONISH_RESPONSE_RE = re.compile(
     r'"\s*(?:text|key_terms)\s*"|\b(?:text|key_terms)\s*:',
     re.IGNORECASE | re.DOTALL,
 )
+_EMPTY_INPUT_RESPONSE_RE = re.compile(
+    r'\b(?:empty|blank|no|missing)\s+'
+    r'(?:text|input|source|content|korean|paragraph|claim)\b|'
+    r'\b(?:text|input|source|content|korean|paragraph|claim)\s+'
+    r'(?:is|was|appears\s+to\s+be)?\s*(?:empty|blank|missing)\b|'
+    r'\bnothing\s+to\s+translate\b',
+    re.IGNORECASE,
+)
 
 _PLACEHOLDER_LITERALS = frozenset({
     "<english translation>",
@@ -61,6 +69,8 @@ def clean_translation_text(value: str | None) -> str:
     if not text:
         return ""
     if _JSONISH_RESPONSE_RE.search(text):
+        return ""
+    if len(text) <= 240 and _EMPTY_INPUT_RESPONSE_RE.search(text):
         return ""
     return text
 
