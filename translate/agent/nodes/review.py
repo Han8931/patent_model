@@ -15,6 +15,8 @@ from ..claim_classifier import PreambleSpec, method_dependent_connective
 from ..docx_utils import postprocess
 from ..glossary import extract_json_block
 from ..nodes.translate_claims import (
+    _assert_claims_translated,
+    _contains_hangul,
     _dependent_opening,
     _enforce_dependent_preamble,
 )
@@ -169,8 +171,22 @@ def make_revise(kind: SectionKind) -> Callable[[TranslationState], dict]:
                         text,
                         claim_specs,
                     )
-                translated_chunks[idx].translation = postprocess(text)
+                    text = postprocess(text)
+                    if _contains_hangul(text):
+                        if verbose:
+                            claim_num = translated_chunks[idx].claim_num
+                            print(
+                                f"  [REVIEW {kind}] Skipped claim {claim_num} "
+                                "revision containing Korean/Hangul text."
+                            )
+                        continue
+                else:
+                    text = postprocess(text)
+                translated_chunks[idx].translation = text
                 applied += 1
+
+        if kind == "claims":
+            _assert_claims_translated(chunks)
 
         if verbose:
             print(f"  [REVIEW {kind}] Applied {applied} revision(s).")

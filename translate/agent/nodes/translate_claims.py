@@ -29,9 +29,16 @@ from ..claim_classifier import (
 )
 from ..docx_utils import postprocess
 from ..glossary import clean_translation_text, extract_json_block, merge_terms
-from ..prompts import build_claim_messages
+from ..prompts import build_claim_messages, build_claim_retry_messages
 from ..sections import LLM_CLAIM_PREFIX_RE
 from ..state import Chunk, TranslationState
+
+
+_HANGUL_RE = re.compile(r'[가-힯]')
+
+
+def _contains_hangul(text: str | None) -> bool:
+    return bool(text and _HANGUL_RE.search(text))
 
 
 def _format_translation(claim_num: int, raw_text: str) -> str:
@@ -152,46 +159,76 @@ def _translate_one(
         chunk, parent_spec, method_connective
     )
 
-    try:
-        messages = build_claim_messages(
-            claim_num=chunk.claim_num,
-            chunk_text=chunk.text,
-            glossary=glossary,
-            kind=chunk.claim_kind or "device",
-            is_independent=bool(chunk.is_independent),
-            parent_spec=parent_spec,
-            parent_claim_nums=chunk.parent_claim_nums,
-            multi_parent_kind=chunk.multi_parent_kind,
-            method_connective=method_connective,
-            equation_context=chunk.equation_context,
-            independent_preamble=chunk.independent_preamble,
-        )
-        raw = client.complete(messages)
-        data = extract_json_block(raw) or {}
-        text = clean_translation_text(data.get("text")) or clean_translation_text(raw)
-        if text:
-            if chunk.is_independent:
-                text = _enforce_independent_preamble(
-                    text, chunk.independent_preamble
-                )
+    messages = build_claim_messages(
+        claim_num=chunk.claim_num,
+        chunk_text=chunk.text,
+        glossary=glossary,
+        kind=chunk.claim_kind or "device",
+        is_independent=bool(chunk.is_independent),
+        parent_spec=parent_spec,
+        parent_claim_nums=chunk.parent_claim_nums,
+        multi_parent_kind=chunk.multi_parent_kind,
+        method_connective=method_connective,
+        equation_context=chunk.equation_context,
+        independent_preamble=chunk.independent_preamble,
+    )
+
+    last_problem = ""
+    for attempt in range(2):
+        try:
+            raw = client.complete(messages)
+            data = extract_json_block(raw) or {}
+            text = clean_translation_text(data.get("text")) or clean_translation_text(raw)
+            if not text:
+                last_problem = "The response did not contain usable English text."
+            elif _contains_hangul(text):
+                last_problem = "The response still contains Korean/Hangul text."
             else:
-                text = _enforce_dependent_preamble(
-                    text, required_dependent_opening
-                )
-            chunk.translation = _format_translation(chunk.claim_num, postprocess(text))
-        else:
-            if verbose:
-                print(
-                    f"  translate_claims claim {chunk.claim_num}: "
-                    "empty/placeholder output, keeping Korean"
-                )
-            chunk.translation = f"{chunk.claim_num}. {chunk.text}"
-        return data
-    except Exception as exc:
+                if chunk.is_independent:
+                    text = _enforce_independent_preamble(
+                        text, chunk.independent_preamble
+                    )
+                else:
+                    text = _enforce_dependent_preamble(
+                        text, required_dependent_opening
+                    )
+                formatted = _format_translation(chunk.claim_num, postprocess(text))
+                if _contains_hangul(formatted):
+                    last_problem = "The formatted claim still contains Korean/Hangul text."
+                else:
+                    chunk.translation = formatted
+                    return data
+        except Exception as exc:
+            last_problem = f"The model call failed: {type(exc).__name__}: {exc}"
+
         if verbose:
-            print(f"  translate_claims claim {chunk.claim_num} failed: {exc}")
-        chunk.translation = f"{chunk.claim_num}. {chunk.text}"
-        return None
+            prefix = f"  translate_claims claim {chunk.claim_num}: "
+            suffix = " Retrying..." if attempt == 0 else ""
+            print(f"{prefix}{last_problem}{suffix}")
+        if attempt == 0:
+            messages = build_claim_retry_messages(
+                previous_messages=messages,
+                problem=last_problem,
+                chunk_text=chunk.text,
+            )
+
+    chunk.translation = ""
+    return None
+
+
+def _assert_claims_translated(chunks: list[Chunk]) -> None:
+    failed = [
+        str(c.claim_num)
+        for c in chunks
+        if c.claim_num is not None
+        and (not c.translation or _contains_hangul(c.translation))
+    ]
+    if failed:
+        raise RuntimeError(
+            "Claim translation failed for claim(s): "
+            + ", ".join(failed)
+            + ". Refusing to write a partially Korean claims section."
+        )
 
 
 def translate_claims(state: TranslationState) -> dict:
@@ -290,4 +327,5 @@ def translate_claims(state: TranslationState) -> dict:
         if delay > 0:
             time.sleep(delay)
 
+    _assert_claims_translated(valid)
     return {"chunks_claims": chunks, "glossary": glossary}

@@ -428,6 +428,29 @@ def build_claim_messages(
     ]
 
 
+def build_claim_retry_messages(
+    *,
+    previous_messages: list[dict],
+    problem: str,
+    chunk_text: str,
+) -> list[dict]:
+    """Strengthen a claim prompt after an invalid/untranslated response."""
+    retry = (
+        "The previous response was invalid and must be corrected.\n"
+        f"Problem: {problem}\n"
+        "\n"
+        "Translate the Korean claim completely into English now.\n"
+        "- Do not leave any Korean/Hangul text in the English claim.\n"
+        "- Do not output JSON schema text, key_terms-only text, commentary, or markdown.\n"
+        "- Return JSON ONLY with a real English claim in the text field:\n"
+        '{"text": "<complete English claim sentence>", "key_terms": []}\n'
+        "\n"
+        "Korean claim to translate:\n"
+        f"{chunk_text}\n"
+    )
+    return previous_messages + [{"role": "user", "content": retry}]
+
+
 # ---------------------------------------------------------------------------
 # Review — decide + revise per section
 # ---------------------------------------------------------------------------
