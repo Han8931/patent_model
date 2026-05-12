@@ -18,6 +18,7 @@ from ..docx_utils import (
     has_non_text_content,
     insert_para_after,
     normalize_symbol,
+    remove_paragraph,
     replace_text,
     word_count,
 )
@@ -443,7 +444,7 @@ def _apply_claim_with_equations(chunk: Chunk, records, font: str) -> bool:
     for idx in chunk.paragraph_indices[1:]:
         if idx in equation_set or idx in used_text_indices:
             continue
-        replace_text(records[idx].para, "", font)
+        remove_paragraph(records[idx].para)
 
     return True
 
@@ -479,11 +480,14 @@ def _apply_chunk(chunk: Chunk, records, font: str) -> None:
 
     replace_text(head_record.para, chunk.translation, font)
 
-    # Blank the trailing paragraphs. replace_text only modifies <w:r> text runs;
-    # any leftover XML (drawings, Korean math being removed) is handled inside
-    # replace_text. After consolidation, formula equations are no longer here.
+    # Blank the trailing paragraphs. For claims, remove them entirely so the
+    # original claim body paragraph does not remain as an empty line after the
+    # translated claim header paragraph.
     for idx in chunk.paragraph_indices[1:]:
-        replace_text(records[idx].para, "", font)
+        if chunk.kind == "claim":
+            remove_paragraph(records[idx].para)
+        else:
+            replace_text(records[idx].para, "", font)
 
 
 def _safe_apply_chunk(chunk: Chunk, records, font: str, progress, verbose: bool) -> bool:

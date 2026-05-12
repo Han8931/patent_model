@@ -30,15 +30,37 @@ from ..claim_classifier import (
 from ..docx_utils import postprocess
 from ..glossary import clean_translation_text, extract_json_block, merge_terms
 from ..prompts import build_claim_messages
-from ..sections import CLAIM_ELEMENT_CAP_RE, LLM_CLAIM_PREFIX_RE
+from ..sections import LLM_CLAIM_PREFIX_RE
 from ..state import Chunk, TranslationState
 
 
 def _format_translation(claim_num: int, raw_text: str) -> str:
     """Strip LLM-added claim numbers, lowercase after ';'/':',  prepend 'N. '."""
     text = LLM_CLAIM_PREFIX_RE.sub('', raw_text.strip())
-    text = CLAIM_ELEMENT_CAP_RE.sub(lambda m: '\n' + m.group(1).lower(), text)
+    text = re.sub(r'(?<=[;:])\n([A-Z])', _lower_claim_element_initial, text)
     return f"{claim_num}. {text}"
+
+
+def _lower_claim_element_initial(m: re.Match) -> str:
+    """Lowercase claim element starts, but preserve parameter symbols.
+
+    After postprocess(), parameter legends often look like
+    'A is ...;\nB is ...'. The old formatter lowercased B/C/etc. because it
+    blindly lowercased every capital after ';\\n'. Keep single-letter and
+    all-caps symbols when they are followed by a definition verb.
+    """
+    text = m.string
+    pos = m.end(1)
+    tail = text[pos:]
+    if pos < len(text) and re.match(r'[A-Z0-9_₀-₉]', text[pos]):
+        return "\n" + m.group(1)
+    if re.match(
+        r'\s+(?:is|are|denotes?|represents?|stands?\s+for|indicates?|means?)\b',
+        tail,
+        flags=re.IGNORECASE,
+    ):
+        return "\n" + m.group(1)
+    return "\n" + m.group(1).lower()
 
 
 def _enforce_independent_preamble(text: str, planned: str | None) -> str:
@@ -156,7 +178,7 @@ def _translate_one(
                 text = _enforce_dependent_preamble(
                     text, required_dependent_opening
                 )
-            chunk.translation = postprocess(_format_translation(chunk.claim_num, text))
+            chunk.translation = _format_translation(chunk.claim_num, postprocess(text))
         else:
             if verbose:
                 print(

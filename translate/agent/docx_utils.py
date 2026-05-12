@@ -60,6 +60,14 @@ def has_non_text_content(para) -> bool:
     return has_drawing(para) or has_math(para)
 
 
+def remove_paragraph(para) -> None:
+    """Remove a paragraph from the document XML."""
+    p = para._p
+    parent = p.getparent()
+    if parent is not None:
+        parent.remove(p)
+
+
 def text_runs(para) -> list:
     return [r for r in para.runs if r.text]
 
