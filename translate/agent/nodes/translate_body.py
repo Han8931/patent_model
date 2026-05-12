@@ -39,20 +39,6 @@ def _apply_paragraph_id_prefix(chunk: Chunk, text: str) -> str:
     return translated
 
 
-def _assert_body_translated(chunks: list[Chunk]) -> None:
-    failed = [
-        c.id
-        for c in chunks
-        if not c.translation or _contains_hangul(c.translation)
-    ]
-    if failed:
-        raise RuntimeError(
-            "Body translation failed for chunk(s): "
-            + ", ".join(failed)
-            + ". Refusing to write a partially Korean body section."
-        )
-
-
 def translate_body(state: TranslationState) -> dict:
     chunks = state.get("chunks_body", [])
     if not chunks:
@@ -66,6 +52,7 @@ def translate_body(state: TranslationState) -> dict:
 
     total = len(chunks)
     progress(f"Translating BODY ({total} chunks)…")
+    failed: list[str] = []
     for i, chunk in enumerate(chunks, 1):
         messages = build_body_messages(
             chunk.text,
@@ -104,6 +91,7 @@ def translate_body(state: TranslationState) -> dict:
             chunk.translation = ""
 
         if not chunk.translation:
+            failed.append(chunk.id)
             if verbose:
                 print(
                     f"  translate_body chunk {chunk.id}: "
@@ -117,5 +105,10 @@ def translate_body(state: TranslationState) -> dict:
         if delay > 0:
             time.sleep(delay)
 
-    _assert_body_translated(chunks)
+    if failed:
+        progress(
+            "WARNING: BODY translation unavailable for chunk(s): "
+            + ", ".join(failed)
+            + ". Those source paragraphs will remain unchanged unless the final Korean-ratio check aborts the file."
+        )
     return {"chunks_body": chunks, "glossary": glossary}

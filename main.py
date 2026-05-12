@@ -62,6 +62,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--no-review", action="store_true", help="Skip the post-translation review pass")
     parser.add_argument("--quiet", action="store_true", help="Suppress progress output")
+    parser.add_argument(
+        "--log",
+        type=Path,
+        default=None,
+        help="Translation log path (default: same as output with .log suffix)",
+    )
     return parser.parse_args()
 
 
@@ -101,6 +107,8 @@ def main() -> None:
             delay=args.delay,
             verbose=not args.quiet,
             review=not args.no_review,
+            log_path=args.log,
+            progress_callback=(lambda _: None) if args.quiet else None,
         )
     except Exception:
         # On any failure, remove a partial output so the user can't mistake a

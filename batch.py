@@ -55,6 +55,7 @@ def _translate_file(job: dict) -> dict:
     """Translate one file. Returns a result dict with status and paths."""
     input_path = Path(job["input"])
     output_path = Path(job["output"])
+    log_path = output_path.with_suffix(".log")
     name = input_path.name
 
     try:
@@ -72,10 +73,16 @@ def _translate_file(job: dict) -> dict:
             delay=job["delay"],
             verbose=False,
             review=job["review"],
+            log_path=log_path,
             progress_callback=_progress,
         )
         _progress(f"Done → {output_path}")
-        return {"input": str(input_path), "output": str(output_path), "ok": True}
+        return {
+            "input": str(input_path),
+            "output": str(output_path),
+            "log": str(log_path),
+            "ok": True,
+        }
 
     except Exception:
         # Cleanup: never leave a partial / pre-copied file on disk that the
@@ -87,8 +94,13 @@ def _translate_file(job: dict) -> dict:
                 output_path.unlink()
         except OSError:
             pass
-        print(f"[{name}] FAILED:\n{traceback.format_exc()}")
-        return {"input": str(input_path), "output": str(output_path), "ok": False}
+        print(f"[{name}] FAILED (log: {log_path}):\n{traceback.format_exc()}")
+        return {
+            "input": str(input_path),
+            "output": str(output_path),
+            "log": str(log_path),
+            "ok": False,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +195,7 @@ def main() -> None:
     if err:
         print("Failed:")
         for r in err:
-            print(f"  {r['input']}")
+            print(f"  {r['input']}  (log: {r.get('log')})")
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ from ..docx_utils import (
     has_drawing,
     has_math,
     has_non_text_content,
+    iter_all_paragraphs,
     insert_para_after,
     normalize_symbol,
     remove_paragraph,
@@ -509,6 +510,12 @@ def _safe_apply_chunk(chunk: Chunk, records, font: str, progress, verbose: bool)
     entire write. The user then got back the *pre-copied original* — a silent
     Korean failure. Now any one failure leaves only that chunk's source visible.
     """
+    if not chunk.translation or not chunk.translation.strip():
+        progress(
+            f"  WRITE SKIPPED on chunk {chunk.id} "
+            f"(paragraphs {chunk.paragraph_indices}): missing translation"
+        )
+        return False, None
     try:
         last_para = _apply_chunk(chunk, records, font)
         return True, last_para
@@ -532,7 +539,7 @@ def _korean_char_ratio(doc) -> float:
     """
     hangul = 0
     letters = 0
-    for p in doc.paragraphs:
+    for p in iter_all_paragraphs(doc):
         for ch in (p.text or ""):
             if ch.isalpha():
                 letters += 1
