@@ -44,6 +44,10 @@ def _strip_paragraph_id(text: str) -> tuple[str, str | None]:
         return text, None
     return text[m.end():], f"[{m.group(1)}]"
 
+
+def _has_paragraph_id(text: str) -> bool:
+    return bool(_PARAGRAPH_ID_RE.match(text))
+
 # Approximate per-chunk character budget. Korean output ≈ 1 char per token, so
 # ~1800 chars leaves headroom for the LLM's English answer plus its system+user
 # prompt overhead within a typical 4–8k token context window. Patent paragraphs
@@ -102,9 +106,10 @@ def chunk_body(state: TranslationState) -> dict:
         group = [head]
         cumulative_chars = len(head.raw)
 
-        # Mixed paragraphs (text + equation) are singleton chunks — never merge into them
-        # or out of them.
-        if not head.mixed:
+        # Mixed paragraphs and numbered paragraph-ID paragraphs are singleton
+        # chunks. A "[001]" paragraph ending with "," or ":" must not absorb
+        # "[002]", because write-back blanks trailing body paragraphs.
+        if not head.mixed and not _has_paragraph_id(head.raw):
             while i + len(group) < len(body_records):
                 tail = group[-1]
                 nxt = body_records[i + len(group)]
@@ -116,6 +121,10 @@ def chunk_body(state: TranslationState) -> dict:
                     break
                 # Stop if the next paragraph is mixed (it must stand alone)
                 if nxt.mixed:
+                    break
+                # Stop before a new numbered paragraph ID. It needs its own
+                # chunk so its prefix can be restored to its own paragraph.
+                if _has_paragraph_id(nxt.raw):
                     break
                 # Continue only if the previous paragraph clearly didn't finish
                 if not _is_continuation(tail.raw):

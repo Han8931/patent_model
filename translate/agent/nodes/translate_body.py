@@ -2,12 +2,55 @@
 
 from __future__ import annotations
 
+import re
 import time
 
 from ..docx_utils import postprocess
 from ..glossary import clean_translation_text, extract_json_block, merge_terms
-from ..prompts import build_body_messages
-from ..state import TranslationState
+from ..prompts import build_body_messages, build_body_retry_messages
+from ..state import Chunk, TranslationState
+
+
+_HANGUL_RE = re.compile(r'[가-힯]')
+
+
+def _contains_hangul(text: str | None) -> bool:
+    return bool(text and _HANGUL_RE.search(text))
+
+
+def _extract_body_text(raw: str) -> tuple[str, dict]:
+    data = extract_json_block(raw) or {}
+    text = clean_translation_text(data.get("text"))
+    if not text:
+        # Some models return plain text instead of JSON. This is acceptable,
+        # including paragraph-ID-prefixed text such as "[001] The ...".
+        text = clean_translation_text(raw)
+    return text, data
+
+
+def _apply_paragraph_id_prefix(chunk: Chunk, text: str) -> str:
+    translated = postprocess(text)
+    # Re-attach the head paragraph's '[NNN]' ID that chunk_body stripped before
+    # sending to the LLM. If the model already emitted it, keep exactly one.
+    if chunk.paragraph_id_prefix and not translated.startswith(
+        chunk.paragraph_id_prefix
+    ):
+        translated = f"{chunk.paragraph_id_prefix} {translated.lstrip()}"
+    return translated
+
+
+def _assert_body_translated(chunks: list[Chunk]) -> None:
+    failed = [
+        c.id
+        for c in chunks
+        if not c.translation or _contains_hangul(c.translation)
+    ]
+    if failed:
+        raise RuntimeError(
+            "Body translation failed for chunk(s): "
+            + ", ".join(failed)
+            + ". Refusing to write a partially Korean body section."
+        )
 
 
 def translate_body(state: TranslationState) -> dict:
@@ -24,44 +67,48 @@ def translate_body(state: TranslationState) -> dict:
     total = len(chunks)
     progress(f"Translating BODY ({total} chunks)…")
     for i, chunk in enumerate(chunks, 1):
-        try:
-            raw = client.complete(
-                build_body_messages(
-                    chunk.text,
-                    glossary,
-                    equation_context=chunk.equation_context,
-                )
-            )
-            data = extract_json_block(raw) or {}
-            text = clean_translation_text(data.get("text"))
-            if not text:
-                # Don't fall back to raw if the LLM just echoed our schema —
-                # writing '<English translation>' verbatim to the docx is worse
-                # than leaving the Korean visible.
-                fallback = clean_translation_text(raw)
-                text = fallback
-            if text:
-                translated = postprocess(text)
-                # Re-attach the head paragraph's '[NNN]' ID that chunk_body
-                # stripped before sending to the LLM. We trust the source's
-                # original prefix verbatim; if the LLM happened to emit its
-                # own '[NNN]' anywhere in the translation, leave that to the
-                # body of the paragraph — only the leading prefix needs to
-                # match the source exactly.
-                if chunk.paragraph_id_prefix and not translated.startswith(
-                    chunk.paragraph_id_prefix
-                ):
-                    translated = f"{chunk.paragraph_id_prefix} {translated.lstrip()}"
-                chunk.translation = translated
-            else:
-                if verbose:
-                    print(f"  translate_body chunk {chunk.id}: empty/placeholder output, keeping Korean")
-                chunk.translation = chunk.text
-            merge_terms(glossary, data.get("key_terms") or [])
-        except Exception as exc:
+        messages = build_body_messages(
+            chunk.text,
+            glossary,
+            equation_context=chunk.equation_context,
+        )
+        last_problem = ""
+        for attempt in range(2):
+            try:
+                raw = client.complete(messages)
+                text, data = _extract_body_text(raw)
+                if not text:
+                    last_problem = "The response did not contain usable English text."
+                else:
+                    translated = _apply_paragraph_id_prefix(chunk, text)
+                    if _contains_hangul(translated):
+                        last_problem = "The response still contains Korean/Hangul text."
+                    else:
+                        chunk.translation = translated
+                        merge_terms(glossary, data.get("key_terms") or [])
+                        break
+            except Exception as exc:
+                last_problem = f"The model call failed: {type(exc).__name__}: {exc}"
+
             if verbose:
-                print(f"  translate_body chunk {chunk.id} failed: {exc}")
-            chunk.translation = chunk.text  # leave Korean as fallback marker
+                prefix = f"  translate_body chunk {chunk.id}: "
+                suffix = " Retrying..." if attempt == 0 else ""
+                print(f"{prefix}{last_problem}{suffix}")
+            if attempt == 0:
+                messages = build_body_retry_messages(
+                    previous_messages=messages,
+                    problem=last_problem,
+                    chunk_text=chunk.text,
+                )
+        else:
+            chunk.translation = ""
+
+        if not chunk.translation:
+            if verbose:
+                print(
+                    f"  translate_body chunk {chunk.id}: "
+                    "translation unavailable after retry"
+                )
 
         # Heartbeat every 10 chunks (and at the end)
         if i % 10 == 0 or i == total:
@@ -70,4 +117,5 @@ def translate_body(state: TranslationState) -> dict:
         if delay > 0:
             time.sleep(delay)
 
+    _assert_body_translated(chunks)
     return {"chunks_body": chunks, "glossary": glossary}

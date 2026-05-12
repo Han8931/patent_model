@@ -14,8 +14,8 @@ _JSON_RE = re.compile(r'(\{.*\}|\[.*\])', re.DOTALL)
 # translations. We treat them as empty so callers fall back to the failure path.
 _PLACEHOLDER_LITERAL_RE = re.compile(r'^\s*<[^<>]+>\s*$')
 _JSONISH_RESPONSE_RE = re.compile(
-    r'^\s*(?:```(?:json)?\s*)?[\{\[]|"\s*(?:text|key_terms)\s*"|'
-    r'\b(?:text|key_terms)\s*:',
+    r'^\s*(?:```(?:json)?\s*)?(?:\{|\[(?!\d{1,5}\]))|'
+    r'"\s*(?:text|key_terms)\s*"|\b(?:text|key_terms)\s*:',
     re.IGNORECASE | re.DOTALL,
 )
 

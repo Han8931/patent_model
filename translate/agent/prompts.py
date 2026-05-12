@@ -214,6 +214,31 @@ def build_body_messages(
     ]
 
 
+def build_body_retry_messages(
+    *,
+    previous_messages: list[dict],
+    problem: str,
+    chunk_text: str,
+) -> list[dict]:
+    """Strengthen a body prompt after an invalid/untranslated response."""
+    retry = (
+        "The previous response was invalid and must be corrected.\n"
+        f"Problem: {problem}\n"
+        "\n"
+        "Translate the Korean patent paragraph completely into English now.\n"
+        "- Do not leave any Korean/Hangul text in the English paragraph.\n"
+        "- Do not output JSON schema text, key_terms-only text, commentary, or markdown.\n"
+        "- If the source paragraph originally had a numeric paragraph ID such as [001], "
+        "preserve it only if it appears in the text shown below.\n"
+        "- Return JSON ONLY with real English text:\n"
+        '{"text": "<complete English paragraph>", "key_terms": []}\n'
+        "\n"
+        "Korean paragraph to translate:\n"
+        f"{chunk_text}\n"
+    )
+    return previous_messages + [{"role": "user", "content": retry}]
+
+
 # ---------------------------------------------------------------------------
 # Abstract — single coherent paragraph
 # ---------------------------------------------------------------------------
