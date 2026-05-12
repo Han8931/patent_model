@@ -285,6 +285,15 @@ def _replace_text_with_math_placeholders(para, new_text: str, font_name: str) ->
         parts.append('')
     parts = [_EQUATION_TOKEN_RE.sub('', part) for part in parts]
 
+    # When the LLM grouped every [EQUATION_N] marker together so all the
+    # parameter clauses ended up in one slot, parse the description and
+    # reassign clauses to math elements by symbol matching. Lazy import to
+    # break the docx_utils ↔ nodes.write cycle (write imports docx_utils
+    # at module load time; the redistribute helper lives there).
+    if len(formula_math) >= 2:
+        from .nodes.write import _redistribute_inline_math
+        parts = _redistribute_inline_math(parts, formula_math)
+
     # Clear existing normal text. The equation XML remains in its original spot.
     for run in para.runs:
         write_run_with_breaks(run, '', font_name)

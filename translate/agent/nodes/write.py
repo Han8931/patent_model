@@ -337,6 +337,39 @@ def _standalone_equation_indices(chunk: Chunk, records) -> list[int]:
     ]
 
 
+def _redistribute_inline_math(parts: list[str], math_elements: list) -> list[str]:
+    """Redistribute LLM-grouped descriptions across INLINE <m:oMath> elements.
+
+    Same idea as ``_redistribute_grouped_parameters`` but operates on
+    ``<m:oMath>`` elements inside one paragraph rather than separate
+    equation paragraphs. Called from ``docx_utils._replace_text_with_math_placeholders``
+    via a lazy import (the import has to be lazy because docx_utils is
+    imported by this module, and we'd otherwise loop at module load).
+    """
+    if len(parts) <= 1 or not math_elements:
+        return parts
+    body = parts[1:]
+    non_empty = [(i, p.strip()) for i, p in enumerate(body) if p.strip()]
+    if len(non_empty) != 1:
+        return parts
+    blob_idx, blob = non_empty[0]
+
+    pairs = _split_into_parameter_clauses(blob)
+    if len(pairs) < 2:
+        return parts
+
+    eq_vars: list[set[str]] = [
+        {normalize_symbol(v).lower() for v in extract_equation_variables(el)}
+        for el in math_elements
+    ]
+    if not any(eq_vars):
+        return parts
+
+    if _vars_are_disjoint(eq_vars):
+        return _split_per_equation(parts, eq_vars, pairs, blob_idx)
+    return _reformat_only(parts, pairs, blob_idx)
+
+
 def _immediate_next_text_paragraph_index(
     chunk: Chunk,
     records,
