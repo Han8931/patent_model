@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 
-from ..docx_utils import extract_math_texts, has_drawing, has_math
+from ..docx_utils import extract_all_text, extract_math_texts, has_drawing, has_math
 from ..sections import BODY_SECTIONS
 from ..state import Chunk, TranslationState
 
@@ -88,6 +88,50 @@ def _add_equation_context(
         context[marker] = formula
 
 
+def _body_text_record(r) -> bool:
+    return (
+        r.kind == "text"
+        and (r.section in BODY_SECTIONS or r.section is None)
+    )
+
+
+def _body_formula_record(r) -> bool:
+    return (
+        r.kind == "image"
+        and (r.section in BODY_SECTIONS or r.section is None)
+        and has_math(r.para)
+        and not has_drawing(r.para)
+    )
+
+
+def _same_body_section(a, b) -> bool:
+    return a.section == b.section
+
+
+def _can_append_to_body_group(group, nxt) -> bool:
+    tail = group[-1]
+    if not _same_body_section(tail, nxt):
+        return False
+    if nxt.index != tail.index + 1:
+        return False
+
+    if _body_formula_record(nxt):
+        return not tail.mixed
+
+    if not _body_text_record(nxt):
+        return False
+    if nxt.mixed:
+        return False
+    if _has_paragraph_id(nxt.raw):
+        return False
+
+    # Keep equation descriptions/legends attached to the equation paragraph.
+    if _body_formula_record(tail):
+        return True
+
+    return _is_continuation(tail.raw)
+
+
 def chunk_body(state: TranslationState) -> dict:
     records = state["records"]
     progress = state.get("progress") or (lambda _: None)
@@ -95,41 +139,27 @@ def chunk_body(state: TranslationState) -> dict:
 
     body_records = [
         r for r in records
-        if r.kind == "text"
-        and (r.section in BODY_SECTIONS or r.section is None)
+        if _body_text_record(r) or _body_formula_record(r)
     ]
 
     i = 0
     chunk_idx = 0
     while i < len(body_records):
         head = body_records[i]
+        if not _body_text_record(head):
+            i += 1
+            continue
         group = [head]
         cumulative_chars = len(head.raw)
 
-        # Mixed paragraphs and numbered paragraph-ID paragraphs are singleton
-        # chunks. A "[001]" paragraph ending with "," or ":" must not absorb
-        # "[002]", because write-back blanks trailing body paragraphs.
-        if not head.mixed and not _has_paragraph_id(head.raw):
+        # Mixed paragraphs are singleton chunks. Numbered paragraph-ID
+        # paragraphs are also singleton text chunks, but may still carry their
+        # immediately following standalone equation/legend block.
+        if not head.mixed:
             while i + len(group) < len(body_records):
-                tail = group[-1]
                 nxt = body_records[i + len(group)]
-                # Stop at section boundary
-                if nxt.section != head.section:
+                if not _can_append_to_body_group(group, nxt):
                     break
-                # Stop on index gap (e.g. an image paragraph sat between)
-                if nxt.index != tail.index + 1:
-                    break
-                # Stop if the next paragraph is mixed (it must stand alone)
-                if nxt.mixed:
-                    break
-                # Stop before a new numbered paragraph ID. It needs its own
-                # chunk so its prefix can be restored to its own paragraph.
-                if _has_paragraph_id(nxt.raw):
-                    break
-                # Continue only if the previous paragraph clearly didn't finish
-                if not _is_continuation(tail.raw):
-                    break
-                # Hard size cap — see _CHUNK_MAX_CHARS comment above.
                 if cumulative_chars + len(nxt.raw) > _CHUNK_MAX_CHARS:
                     break
                 group.append(nxt)
@@ -150,6 +180,8 @@ def chunk_body(state: TranslationState) -> dict:
                 source_text = stripped_raw
             else:
                 source_text = r.raw  # keep as-is so the LLM's per-line rendering still works
+            if _body_formula_record(r):
+                source_text = extract_all_text(r.para) or "[EQUATION]"
             numbered, next_eq, markers = _number_equation_placeholders(
                 source_text, next_eq
             )

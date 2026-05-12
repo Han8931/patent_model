@@ -330,7 +330,7 @@ def _redistribute_grouped_parameters(
     return _reformat_only(parts, pairs, blob_idx)
 
 
-def _claim_equation_indices(chunk: Chunk, records) -> list[int]:
+def _standalone_equation_indices(chunk: Chunk, records) -> list[int]:
     return [
         idx for idx in chunk.paragraph_indices[1:]
         if has_math(records[idx].para) and not has_drawing(records[idx].para)
@@ -390,9 +390,9 @@ def _legend_reference_para(chunk: Chunk, records, equation_set: set[int]):
     return None
 
 
-def _apply_claim_with_equations(chunk: Chunk, records, font: str):
-    """Apply a translated claim while preserving equation paragraph alignment."""
-    equation_indices = _claim_equation_indices(chunk, records)
+def _apply_chunk_with_standalone_equations(chunk: Chunk, records, font: str):
+    """Apply translated text while preserving standalone equation paragraphs."""
+    equation_indices = _standalone_equation_indices(chunk, records)
     if not equation_indices:
         return None
 
@@ -456,10 +456,11 @@ def _apply_claim_with_equations(chunk: Chunk, records, font: str):
 def _apply_chunk(chunk: Chunk, records, font: str):
     """Write the chunk's translation into the FIRST paragraph; blank the rest.
 
-    Claims with standalone equation paragraphs are handled separately so Word's
-    original equation paragraph alignment is preserved. For other multi-paragraph
-    chunks, formula equations from trailing paragraphs are moved into the head
-    paragraph so replace_text() can interleave text around [EQUATION] markers.
+    Claims and body chunks with standalone equation paragraphs are handled
+    separately so Word's original equation paragraph alignment is preserved.
+    For other multi-paragraph chunks, formula equations from trailing
+    paragraphs are moved into the head paragraph so replace_text() can
+    interleave text around [EQUATION] markers.
 
     If the translation is empty/missing, leave the original paragraph untouched
     so the source text remains visible as a flag.
@@ -469,10 +470,10 @@ def _apply_chunk(chunk: Chunk, records, font: str):
     if not chunk.translation or not chunk.translation.strip():
         return None  # leave Korean visible — better than silent disappearance
 
-    if chunk.kind == "claim":
-        claim_last = _apply_claim_with_equations(chunk, records, font)
-        if claim_last is not None:
-            return claim_last
+    if chunk.kind in {"claim", "body"}:
+        equation_last = _apply_chunk_with_standalone_equations(chunk, records, font)
+        if equation_last is not None:
+            return equation_last
 
     head_idx = chunk.paragraph_indices[0]
     head_record = records[head_idx]
