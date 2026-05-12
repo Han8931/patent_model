@@ -10,7 +10,18 @@ from typing import Dict
 _BRACKET_RULES = (
     "\n"
     "BRACKET / BRACE TRANSLATION POLICY:\n"
-    "1) Square bracket markers with 4–5 digits '[0016]' are paragraph IDs — do NOT translate or remove them.\n"
+    "1) PARAGRAPH-ID MARKERS — any square-bracketed number from 1 to 5 digits at\n"
+    "   the START of a paragraph is a paragraph ID. Examples: '[1]', '[12]',\n"
+    "   '[001]', '[002]', '[0016]', '[0123]'. They MUST appear verbatim at the\n"
+    "   very start of the corresponding output paragraph.\n"
+    "   - DO NOT translate, paraphrase, remove, renumber, or reformat them.\n"
+    "   - DO NOT split, merge, or move them inside the sentence.\n"
+    "   - Preserve the bracket characters '[' and ']' exactly — never '(001)',\n"
+    "     never '[001번]', never 'Paragraph 1', never '<001>'.\n"
+    "   - If the source has 3-digit IDs ('[001]'), keep them 3-digit. Do not\n"
+    "     pad to '[0001]' or strip to '1'.\n"
+    "   - The number of paragraph IDs in the output MUST equal the number of\n"
+    "     paragraph IDs in the source.\n"
     "2) Korean headings in corner brackets '【...】': translate the text, remove '【】' in output.\n"
     "   Examples: '【발명의 명칭】' → 'TITLE OF THE INVENTION', '【요약】' → 'ABSTRACT'.\n"
     "3) Curly braces '{...}': if content is already English, keep it as-is.\n"
@@ -21,6 +32,7 @@ _BRACKET_RULES = (
     "   - '패키지 기판(100)' → 'a package substrate 100'\n"
     "   - Do NOT apply this rule when parentheses contain any non-digit characters.\n"
     "   - Keep as-is: (CPO), (AI), (Optic Engine Unit: OEU), (see FIG. 1).\n"
+    "   - This rule does NOT apply to paragraph-ID brackets (rule 1).\n"
 )
 
 _STYLE_RULES = (

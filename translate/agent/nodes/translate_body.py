@@ -41,7 +41,18 @@ def translate_body(state: TranslationState) -> dict:
                 fallback = clean_translation_text(raw)
                 text = fallback
             if text:
-                chunk.translation = postprocess(text)
+                translated = postprocess(text)
+                # Re-attach the head paragraph's '[NNN]' ID that chunk_body
+                # stripped before sending to the LLM. We trust the source's
+                # original prefix verbatim; if the LLM happened to emit its
+                # own '[NNN]' anywhere in the translation, leave that to the
+                # body of the paragraph — only the leading prefix needs to
+                # match the source exactly.
+                if chunk.paragraph_id_prefix and not translated.startswith(
+                    chunk.paragraph_id_prefix
+                ):
+                    translated = f"{chunk.paragraph_id_prefix} {translated.lstrip()}"
+                chunk.translation = translated
             else:
                 if verbose:
                     print(f"  translate_body chunk {chunk.id}: empty/placeholder output, keeping Korean")

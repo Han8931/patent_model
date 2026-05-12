@@ -36,10 +36,15 @@ class Chunk:
     section: str
     kind: Literal["body", "abstract", "claim"]
     paragraph_indices: list[int]   # indices into state.records
-    text: str                      # joined Korean text
+    text: str                      # joined Korean text (paragraph-ID prefix stripped)
     equation_context: dict[str, str] = field(default_factory=dict)
     claim_num: int | None = None
     translation: str | None = None  # filled by translate_* nodes
+    # Deterministic preservation of '[001]'-style paragraph IDs: when the head
+    # paragraph starts with such a marker, chunk_body strips it from ``text``
+    # (so the LLM never sees it and can't mangle it) and stashes it here so
+    # translate_body prepends it back verbatim onto the translation.
+    paragraph_id_prefix: str | None = None
 
     # Claim-specific structural fields, populated for kind == "claim".
     # Filled by chunk_claims via the deterministic claim_classifier.

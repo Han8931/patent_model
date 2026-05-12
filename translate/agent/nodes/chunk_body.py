@@ -30,6 +30,20 @@ from ..state import Chunk, TranslationState
 _CONTINUATION_TAILS = (":", ",")
 _EQUATION_TOKEN_RE = re.compile(r'\[EQUATION(?:_\d+)?\]')
 
+# Paragraph-ID prefix: '[001]', '[12]', '[0016]', etc. at the start of a
+# paragraph's text. 1–5 digits, optional whitespace after.
+_PARAGRAPH_ID_RE = re.compile(r'^\[(\d{1,5})\]\s*')
+
+
+def _strip_paragraph_id(text: str) -> tuple[str, str | None]:
+    """If ``text`` starts with a '[NNN]' paragraph ID, return (rest, prefix).
+    Otherwise return (text, None). The prefix returned keeps the original
+    bracket form so it can be re-injected verbatim onto the translation."""
+    m = _PARAGRAPH_ID_RE.match(text)
+    if not m:
+        return text, None
+    return text[m.end():], f"[{m.group(1)}]"
+
 # Approximate per-chunk character budget. Korean output ≈ 1 char per token, so
 # ~1800 chars leaves headroom for the LLM's English answer plus its system+user
 # prompt overhead within a typical 4–8k token context window. Patent paragraphs
@@ -115,9 +129,20 @@ def chunk_body(state: TranslationState) -> dict:
         next_eq = 1
         numbered_parts: list[str] = []
         equation_context: dict[str, str] = {}
-        for r in group:
+        head_id_prefix: str | None = None
+        for pos, r in enumerate(group):
+            stripped_raw, id_prefix = _strip_paragraph_id(r.raw)
+            if pos == 0:
+                # Only the head paragraph's ID is preserved deterministically.
+                # Trailing paragraphs (rare — only when continuation merge fires)
+                # have their text blanked by the write step anyway, so their
+                # IDs would be lost regardless.
+                head_id_prefix = id_prefix
+                source_text = stripped_raw
+            else:
+                source_text = r.raw  # keep as-is so the LLM's per-line rendering still works
             numbered, next_eq, markers = _number_equation_placeholders(
-                r.raw, next_eq
+                source_text, next_eq
             )
             if markers and has_math(r.para) and not has_drawing(r.para):
                 _add_equation_context(
@@ -134,6 +159,7 @@ def chunk_body(state: TranslationState) -> dict:
             paragraph_indices=[r.index for r in group],
             text="\n".join(numbered_parts),
             equation_context=equation_context,
+            paragraph_id_prefix=head_id_prefix,
         ))
         chunk_idx += 1
         i += len(group)
