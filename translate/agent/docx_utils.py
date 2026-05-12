@@ -345,7 +345,7 @@ def insert_para_after(
     font_name: str,
     *,
     format_ref_para=None,
-) -> None:
+):
     """Insert a new paragraph immediately after ``ref_para``.
 
     If ``format_ref_para`` is given, clone its <w:pPr> onto the new paragraph
@@ -373,6 +373,7 @@ def insert_para_after(
     new_r.append(new_t)
     new_p.append(new_r)
     ref_para._p.addnext(new_p)
+    return Paragraph(new_p, ref_para._parent)
 
 
 def word_count(text: str) -> int:

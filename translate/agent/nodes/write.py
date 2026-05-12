@@ -389,15 +389,16 @@ def _legend_reference_para(chunk: Chunk, records, equation_set: set[int]):
     return None
 
 
-def _apply_claim_with_equations(chunk: Chunk, records, font: str) -> bool:
+def _apply_claim_with_equations(chunk: Chunk, records, font: str):
     """Apply a translated claim while preserving equation paragraph alignment."""
     equation_indices = _claim_equation_indices(chunk, records)
     if not equation_indices:
-        return False
+        return None
 
     translation = chunk.translation or ""
     head_idx = chunk.paragraph_indices[0]
     used_text_indices = {head_idx}
+    last_para = records[head_idx].para
 
     if _EQUATION_TOKEN_RE.search(translation):
         parts = _EQUATION_TOKEN_RE.split(translation, maxsplit=len(equation_indices))
@@ -419,6 +420,7 @@ def _apply_claim_with_equations(chunk: Chunk, records, font: str) -> bool:
         # Clear any surrounding Korean text but leave the equation XML and its
         # original paragraph formatting/alignment untouched.
         replace_text(records[eq_idx].para, "", font)
+        last_para = records[eq_idx].para
 
     equation_set = set(equation_indices)
     legend_format = _legend_reference_para(chunk, records, equation_set)
@@ -432,7 +434,7 @@ def _apply_claim_with_equations(chunk: Chunk, records, font: str) -> bool:
             chunk, records, eq_idx, used_text_indices, equation_set
         )
         if target_idx is None:
-            insert_para_after(
+            last_para = insert_para_after(
                 records[eq_idx].para, segment, font,
                 format_ref_para=legend_format,
             )
@@ -440,16 +442,17 @@ def _apply_claim_with_equations(chunk: Chunk, records, font: str) -> bool:
 
         replace_text(records[target_idx].para, segment, font)
         used_text_indices.add(target_idx)
+        last_para = records[target_idx].para
 
     for idx in chunk.paragraph_indices[1:]:
         if idx in equation_set or idx in used_text_indices:
             continue
         remove_paragraph(records[idx].para)
 
-    return True
+    return last_para
 
 
-def _apply_chunk(chunk: Chunk, records, font: str) -> None:
+def _apply_chunk(chunk: Chunk, records, font: str):
     """Write the chunk's translation into the FIRST paragraph; blank the rest.
 
     Claims with standalone equation paragraphs are handled separately so Word's
@@ -461,12 +464,14 @@ def _apply_chunk(chunk: Chunk, records, font: str) -> None:
     so the source text remains visible as a flag.
     """
     if not chunk.paragraph_indices:
-        return
+        return None
     if not chunk.translation or not chunk.translation.strip():
-        return  # leave Korean visible — better than silent disappearance
+        return None  # leave Korean visible — better than silent disappearance
 
-    if chunk.kind == "claim" and _apply_claim_with_equations(chunk, records, font):
-        return
+    if chunk.kind == "claim":
+        claim_last = _apply_claim_with_equations(chunk, records, font)
+        if claim_last is not None:
+            return claim_last
 
     head_idx = chunk.paragraph_indices[0]
     head_record = records[head_idx]
@@ -489,8 +494,10 @@ def _apply_chunk(chunk: Chunk, records, font: str) -> None:
         else:
             replace_text(records[idx].para, "", font)
 
+    return head_record.para if chunk.kind == "claim" else None
 
-def _safe_apply_chunk(chunk: Chunk, records, font: str, progress, verbose: bool) -> bool:
+
+def _safe_apply_chunk(chunk: Chunk, records, font: str, progress, verbose: bool) -> tuple[bool, object | None]:
     """Apply one chunk's translation, isolating any crash to that chunk only.
 
     Returns True on success. On failure: logs the chunk id + traceback, leaves
@@ -503,14 +510,14 @@ def _safe_apply_chunk(chunk: Chunk, records, font: str, progress, verbose: bool)
     Korean failure. Now any one failure leaves only that chunk's source visible.
     """
     try:
-        _apply_chunk(chunk, records, font)
-        return True
+        last_para = _apply_chunk(chunk, records, font)
+        return True, last_para
     except Exception as exc:
         msg = f"  WRITE FAILED on chunk {chunk.id} (paragraphs {chunk.paragraph_indices}): {type(exc).__name__}: {exc}"
         progress(msg)
         if verbose:
             traceback.print_exc()
-        return False
+        return False, None
 
 
 def _korean_char_ratio(doc) -> float:
@@ -555,16 +562,25 @@ def write(state: TranslationState) -> dict:
     total = 0
     for chunk in state.get("chunks_body", []):
         total += 1
-        if not _safe_apply_chunk(chunk, indexed_records, font, progress, verbose):
+        success, _ = _safe_apply_chunk(chunk, indexed_records, font, progress, verbose)
+        if not success:
             failed += 1
     for chunk in state.get("chunks_abstract", []):
         total += 1
-        if not _safe_apply_chunk(chunk, indexed_records, font, progress, verbose):
+        success, _ = _safe_apply_chunk(chunk, indexed_records, font, progress, verbose)
+        if not success:
             failed += 1
+    previous_claim_last_para = None
     for chunk in state.get("chunks_claims", []):
+        if previous_claim_last_para is not None:
+            insert_para_after(previous_claim_last_para, "", font)
+            previous_claim_last_para = None
         total += 1
-        if not _safe_apply_chunk(chunk, indexed_records, font, progress, verbose):
+        success, last_para = _safe_apply_chunk(chunk, indexed_records, font, progress, verbose)
+        if not success:
             failed += 1
+            continue
+        previous_claim_last_para = last_para
 
     if total and failed:
         progress(f"WARNING: {failed}/{total} chunks failed to write — those paragraphs remain in Korean.")
