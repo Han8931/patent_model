@@ -120,14 +120,15 @@ def _can_append_to_body_group(group, nxt) -> bool:
 
     if not _body_text_record(nxt):
         return False
-    if nxt.mixed:
-        return False
     if _has_paragraph_id(nxt.raw):
         return False
 
-    # Keep equation descriptions/legends attached to the equation paragraph.
+    # Keep equation descriptions/legends attached to the equation paragraph,
+    # even when the legend's symbols are inline Word math objects.
     if _body_formula_record(tail):
         return True
+    if nxt.mixed:
+        return False
 
     return _is_continuation(tail.raw)
 

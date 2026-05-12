@@ -92,12 +92,12 @@ def main() -> None:
     ]
     interesting = [
         item for item in body
-        if item[0] == "EQ" or "controller" in item[1] or item[1].startswith(("where A", "wherein A"))
+        if item[0] == "EQ" or "controller" in item[1] or item[1].startswith((", where A", "where A", "wherein A"))
     ]
     assert interesting[0][1] == "The controller calculates a value using the following equation:"
     assert interesting[1][0] == "EQ"
     assert interesting[1][2] == WD_ALIGN_PARAGRAPH.CENTER
-    assert interesting[2][1].startswith(("where A is an output value;", "wherein A is an output value;"))
+    assert interesting[2][1].startswith((", where A is an output value;", "where A is an output value;", "wherein A is an output value;"))
     assert not any(any("가" <= ch <= "힣" for ch in text) for _, text, _ in interesting)
 
     print("body standalone equation layout: ok")

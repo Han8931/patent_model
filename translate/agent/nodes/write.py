@@ -32,23 +32,24 @@ _EQUATION_TOKEN_RE = re.compile(r'\[EQUATION(?:_\d+)?\]')
 #   'where A is a thickness, B is a width, X is a length'
 # into per-symbol clauses. The verb may be 'is/are/denotes/represents/...'.
 #
-# A "symbol" is any non-whitespace, non-{,;} run that starts with either
-# a letter (Latin / Greek / math-italic) or one of these math-bracket chars:
+# A "symbol" starts with either a letter (Latin / Greek / math-italic) or
+# one of these math-bracket chars, and may include short arithmetic text:
 #   〖 〗 ( ) [ ] | { }
 # This is broad enough to catch '〖BIT〗_3k', '〖BIT〗_(3k+1)', 'θ_k', 'LLR',
-# '|μ|' etc. while still rejecting common English words at clause boundaries.
+# '|μ|', 'α² + 1/2' etc. while still rejecting common English words at
+# clause boundaries.
 _SYM_FIRST = r"[^\W\d_]|[〖〗()\[\]|{}]"
+_VERB_RE = (
+    r"is|are|denotes?|represents?|stands?\s+for|indicates?|means?"
+)
 _PARAM_CLAUSE_START_RE = re.compile(
-    r"(?:^|[;,]\s*|\s+and\s+|\s+wherein\s+|\s+where\s+|\s+in\s+which\s+)"
-    rf"(?P<sym>(?:{_SYM_FIRST})[^\s,;]*)"
-    r"\s+(?:is|are|denotes?|represents?|stands?\s+for|indicates?|means?)\b",
+    r"(?:^|[;,]\s*(?:and\s+)?|\s+and\s+|\s+wherein\s+|\s+where\s+|\s+in\s+which\s+)"
+    rf"(?P<sym>(?:{_SYM_FIRST})(?:(?!\s+(?:{_VERB_RE})\b)[^,;\n]){{0,80}}?)"
+    rf"\s+(?:{_VERB_RE})\b",
     re.IGNORECASE | re.UNICODE,
 )
 
 
-_VERB_RE = (
-    r"is|are|denotes?|represents?|stands?\s+for|indicates?|means?"
-)
 # Matches the broken 'sym1 sym2 ... symN  <verb>  desc1; desc2; ...' shape:
 #   'LLR θ_k 〖BIT〗_3k μ is the bit reliability data; is the phase-difference …'
 _LIST_THEN_DESCS_RE = re.compile(
@@ -333,7 +334,9 @@ def _redistribute_grouped_parameters(
 def _standalone_equation_indices(chunk: Chunk, records) -> list[int]:
     return [
         idx for idx in chunk.paragraph_indices[1:]
-        if has_math(records[idx].para) and not has_drawing(records[idx].para)
+        if records[idx].kind == "image"
+        and has_math(records[idx].para)
+        and not has_drawing(records[idx].para)
     ]
 
 

@@ -18,6 +18,7 @@ _HANGUL_RE = re.compile(r'[가-힯]')
 _EQUATION_PLACEHOLDER = '[EQUATION]'
 _EQUATION_TOKEN_RE = re.compile(r'\[EQUATION(?:_\d+)?\]')
 _EQUATION_PLACEHOLDER_RE = re.compile(r'\s*\[EQUATION(?:_\d+)?\]\s*')
+_FORMULA_OPERATOR_RE = re.compile(r'[=<>≤≥≈∑∫√]|\b(?:sin|cos|tan|log|ln|exp)\b', re.IGNORECASE)
 
 
 def iter_all_paragraphs(doc):
@@ -103,6 +104,23 @@ def _element_text(el) -> str:
     )
 
 
+def _is_inline_math_symbol(text: str) -> bool:
+    """True for short Word-math expressions that should remain in text.
+
+    Parameter legends often encode symbols/expressions such as A, B, C, α,
+    θ_k, 〖BIT〗_(3k+1), or α² + 1/2 as tiny OMML objects. Treating those as
+    [EQUATION] destroys the symbol-description pairing. Full formulas with
+    equation/comparison operators still become placeholders.
+    """
+    s = text.strip()
+    if not s:
+        return False
+    if _FORMULA_OPERATOR_RE.search(s):
+        return False
+    compact = re.sub(r'\s+', '', s)
+    return len(compact) <= 24
+
+
 def _append_translatable_text(el, parts: list[str], state: dict | None = None) -> None:
     """Append paragraph text while treating each top-level equation as atomic.
 
@@ -121,6 +139,8 @@ def _append_translatable_text(el, parts: list[str], state: dict | None = None) -
         if not math_text:
             return
         if _HANGUL_RE.search(math_text):
+            parts.append(math_text)
+        elif _is_inline_math_symbol(math_text):
             parts.append(math_text)
         else:
             parts.append(_EQUATION_PLACEHOLDER)
