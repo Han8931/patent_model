@@ -45,6 +45,11 @@ class Chunk:
     # (so the LLM never sees it and can't mangle it) and stashes it here so
     # translate_body prepends it back verbatim onto the translation.
     paragraph_id_prefix: str | None = None
+    # Set True when the chunk's translation has already been applied directly
+    # to the source paragraphs (per-paragraph in-place writer for equation-
+    # bearing chunks). The write node sees this flag and skips the chunk so
+    # it doesn't double-apply or run the chunk-level distribution logic.
+    applied_in_place: bool = False
 
     # Claim-specific structural fields, populated for kind == "claim".
     # Filled by chunk_claims via the deterministic claim_classifier.

@@ -13,6 +13,10 @@ from ..prompts import (
     build_clause_messages,
     build_segment_messages,
 )
+from ..paragraph_translator import (
+    chunk_has_math,
+    translate_chunk_per_paragraph,
+)
 from ..sentence_translator import (
     needs_per_segment_translation,
     translate_chunk_by_sentence,
@@ -55,14 +59,63 @@ def translate_body(state: TranslationState) -> dict:
 
     client = state["client"]
     glossary = dict(state.get("glossary", {}))
+    font = state.get("font", "Times New Roman")
     delay = state.get("delay", 0.0)
     progress = state.get("progress") or (lambda _: None)
     verbose = state.get("verbose", False)
+
+    # Per-paragraph in-place lookup needs an index-addressable record list,
+    # not the flat list `state['records']` provides (its index field is the
+    # docx paragraph index, not the list position). Build it once here.
+    records = state.get("records", [])
+    by_index = {r.index: r for r in records}
+    indexed_records: list = (
+        [None] * (max(by_index) + 1) if by_index else []
+    )
+    for idx, r in by_index.items():
+        indexed_records[idx] = r
 
     total = len(chunks)
     progress(f"Translating BODY ({total} chunks)…")
     failed: list[str] = []
     for i, chunk in enumerate(chunks, 1):
+        # Equation-bearing chunks (any paragraph in the chunk has inline math
+        # or is a standalone <m:oMath> paragraph) take the per-paragraph
+        # in-place path: each source paragraph is translated independently and
+        # written back into its own <w:p>, with <m:oMath> elements left
+        # untouched at their source XML position. The write node skips these
+        # chunks because chunk.applied_in_place is set.
+        if chunk_has_math(chunk, indexed_records):
+            try:
+                applied = translate_chunk_per_paragraph(
+                    chunk,
+                    records=indexed_records,
+                    client=client,
+                    glossary=glossary,
+                    font_name=font,
+                    build_segment_messages=build_segment_messages,
+                    build_clause_messages=build_clause_messages,
+                    verbose=verbose,
+                )
+            except Exception as exc:
+                if verbose:
+                    print(
+                        f"  translate_body chunk {chunk.id} (per-paragraph): "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                failed.append(chunk.id)
+            else:
+                if verbose:
+                    print(
+                        f"  translate_body chunk {chunk.id}: "
+                        f"per-paragraph applied to {applied} paragraph(s)"
+                    )
+            if i % 10 == 0 or i == total:
+                progress(f"  BODY {i}/{total}")
+            if delay > 0:
+                time.sleep(delay)
+            continue
+
         # Chunks containing opaque markers ([EQUATION_N] or inline [NNN]
         # paragraph IDs from <w:br> line breaks) take the sentence-level path:
         # one LLM call per text segment and per per-symbol legend clause. The

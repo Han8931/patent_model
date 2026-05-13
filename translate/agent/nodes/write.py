@@ -518,6 +518,11 @@ def _apply_chunk(chunk: Chunk, records, font: str):
     """
     if not chunk.paragraph_indices:
         return None
+    # Equation-bearing body chunks are translated and written by the
+    # per-paragraph in-place path in translate_body. Skip them here so we
+    # don't double-apply or run the chunk-level distribution logic.
+    if getattr(chunk, "applied_in_place", False):
+        return None
     if not chunk.translation or not chunk.translation.strip():
         return None  # leave Korean visible — better than silent disappearance
 
