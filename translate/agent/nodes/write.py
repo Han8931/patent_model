@@ -220,9 +220,24 @@ def _candidate_match_keys(sym: str) -> set[str]:
     return runs
 
 
+# Hanging-indent separator used when the redistribution helpers rebuild a
+# per-parameter clause list from individual clauses. After the head-keyword
+# ('where' / 'wherein'), the first clause sits on the same line, and each
+# subsequent clause goes on its own indented line:
+#
+#     ..., where A is a thickness;
+#         B is a width;
+#         C is a height.
+#
+# Matches the patent-style hanging indent that ``_break_after_semicolons``
+# applies to plain LLM output. ``write_run_with_breaks`` later splits this
+# string on '\n' to emit <w:br/> elements with xml:space="preserve" runs.
+_CLAUSE_SEP = ";\n    "
+
+
 def _format_legend_clauses(pairs: list[tuple[str, str]]) -> str:
     """Join clauses into a per-parameter legend body."""
-    return "; ".join(c for _, c in pairs)
+    return _CLAUSE_SEP.join(c for _, c in pairs)
 
 
 def _split_per_equation(
@@ -252,17 +267,17 @@ def _split_per_equation(
         if not group:
             new_body.append("")
             continue
-        joined = "; ".join(group)
+        joined = _CLAUSE_SEP.join(group)
         end = "." if i == len(groups) - 1 else ";"
         new_body.append(", where " + joined + end)
 
     if unmatched:
-        tail = "; ".join(unmatched)
+        tail = _CLAUSE_SEP.join(unmatched)
         target = blob_idx if 0 <= blob_idx < len(new_body) else len(new_body) - 1
         if new_body[target]:
             stripped = new_body[target].rstrip(".;")
             end = "." if target == len(new_body) - 1 else ";"
-            new_body[target] = stripped + "; " + tail + end
+            new_body[target] = stripped + _CLAUSE_SEP + tail + end
         else:
             end = "." if target == len(new_body) - 1 else ";"
             new_body[target] = ", where " + tail + end

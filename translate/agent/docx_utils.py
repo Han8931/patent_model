@@ -377,6 +377,12 @@ def insert_para_after(
 ):
     """Insert a new paragraph immediately after ``ref_para``.
 
+    The ``text`` may contain ``\\n`` characters from ``postprocess``'s
+    semicolon-and-indent expansion. Those become real ``<w:br/>`` elements
+    and per-line ``<w:t xml:space="preserve">`` runs — without this split,
+    XML treats the raw newline as whitespace and Word collapses it back
+    into a single visual line, losing the indent.
+
     If ``format_ref_para`` is given, clone its <w:pPr> onto the new paragraph
     so the inserted paragraph inherits alignment, indentation, spacing, and
     style. This matters when the new paragraph sits between centered equation
@@ -390,17 +396,9 @@ def insert_para_after(
         if ref_pPr is not None:
             new_p.append(deepcopy(ref_pPr))
 
-    new_r = OxmlElement('w:r')
-    new_rpr = OxmlElement('w:rPr')
-    new_rFonts = OxmlElement('w:rFonts')
-    new_rFonts.set(qn('w:ascii'), font_name)
-    new_rFonts.set(qn('w:hAnsi'), font_name)
-    new_rpr.append(new_rFonts)
-    new_r.append(new_rpr)
-    new_t = OxmlElement('w:t')
-    new_t.text = text
-    new_r.append(new_t)
-    new_p.append(new_r)
+    # _build_text_run already handles the \n → <w:br/> split with
+    # xml:space="preserve" on lines that have leading/trailing whitespace.
+    new_p.append(_build_text_run(text, font_name))
     ref_para._p.addnext(new_p)
     return Paragraph(new_p, ref_para._parent)
 
@@ -500,8 +498,16 @@ def _break_sentences(text: str) -> str:
     return broken.replace('\x00', '.')
 
 
+# Indentation applied to every line that begins after a ';'-break in claim
+# element lists and parameter legends. Four spaces matches typical patent
+# drafting style ("A device comprising:\n    a substrate;\n    a layer; …").
+# Leading-space preservation is handled by write_run_with_breaks, which sets
+# xml:space="preserve" automatically when a run starts with whitespace.
+_SEMICOLON_INDENT = "    "
+
+
 def _break_after_semicolons(text: str) -> str:
-    return re.sub(r';\s+', ';\n', text)
+    return re.sub(r';\s+', f";\n{_SEMICOLON_INDENT}", text)
 
 
 # ---------------------------------------------------------------------------
