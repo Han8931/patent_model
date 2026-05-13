@@ -40,7 +40,7 @@ OUTPUT_SUFFIX = "_en"   # appended to <input_stem> when no --output-name is give
 
 CONFIG = ClientConfig.from_env()   # reads LLM_* variables from .env
 
-WORKERS = 2          # parallel files; keep ≤ Ollama concurrency limit
+WORKERS = 4          # parallel files; keep ≤ Ollama concurrency limit
 BATCH_SIZE = 10      # max paragraphs per section batch sent to the LLM
 REVIEW = True        # run post-translation review pass per section
 FONT = "Times New Roman"
