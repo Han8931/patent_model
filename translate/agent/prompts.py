@@ -240,6 +240,69 @@ def build_body_retry_messages(
 
 
 # ---------------------------------------------------------------------------
+# Sentence-level builders (used by translate_body's equation path)
+# ---------------------------------------------------------------------------
+# These translate ONE Korean text segment or ONE Korean parameter clause at
+# a time so equation positions and per-symbol structure are preserved by
+# construction rather than by a post-hoc redistribution heuristic.
+
+def build_segment_messages(
+    korean_segment: str,
+    glossary: dict[str, str],
+) -> list[dict]:
+    """Translate a single Korean text segment between [EQUATION_N] markers."""
+    system = _system_with_glossary(PROMPT_BODY, glossary)
+    user = (
+        "Translate this Korean patent text fragment into English (USPTO style).\n"
+        "- Return ONE coherent English fragment, no leading/trailing punctuation\n"
+        "  unless the source has it.\n"
+        "- Do NOT add a paragraph ID, do NOT add commentary, do NOT add markdown.\n"
+        "- Do NOT translate or output any [EQUATION_N] marker — the surrounding\n"
+        "  code stitches markers in separately.\n"
+        "- Return JSON ONLY: "
+        '{"text": "<English fragment>", "key_terms": []}\n'
+        "\n"
+        "Korean:\n"
+        f"{korean_segment}\n"
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
+def build_clause_messages(
+    symbol: str,
+    korean_clause: str,
+    glossary: dict[str, str],
+) -> list[dict]:
+    """Translate one Korean '<sym>는 <desc>' parameter clause.
+
+    The output MUST be exactly one clause beginning with ``symbol`` followed by
+    'is' / 'denotes'. The caller stitches multiple clauses together with ';'.
+    """
+    system = _system_with_glossary(PROMPT_BODY, glossary)
+    user = (
+        "Translate this Korean parameter clause into ONE English clause in patent style.\n"
+        f"Symbol: '{symbol}' — keep it VERBATIM as the first token of your output.\n"
+        "- Required output shape: '<symbol> is <description>'  (or '<symbol> denotes <description>').\n"
+        "- Do NOT include 'where', 'wherein', 'in which', semicolons, periods, or\n"
+        "  surrounding punctuation. Just the clause.\n"
+        "- Do NOT change, pad, or strip the symbol — including any brackets, subscripts,\n"
+        "  or Unicode it contains (e.g. '〖BIT〗_3k', 'θ_k', 'α').\n"
+        "- Return JSON ONLY: "
+        '{"text": "<symbol> is <description>", "key_terms": []}\n'
+        "\n"
+        "Korean clause:\n"
+        f"{korean_clause}\n"
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Abstract — single coherent paragraph
 # ---------------------------------------------------------------------------
 

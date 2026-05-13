@@ -7,7 +7,16 @@ import time
 
 from ..docx_utils import postprocess
 from ..glossary import clean_translation_text, extract_json_block, merge_terms
-from ..prompts import build_body_messages, build_body_retry_messages
+from ..prompts import (
+    build_body_messages,
+    build_body_retry_messages,
+    build_clause_messages,
+    build_segment_messages,
+)
+from ..sentence_translator import (
+    is_equation_bearing,
+    translate_chunk_by_sentence,
+)
 from ..state import Chunk, TranslationState
 
 
@@ -54,6 +63,38 @@ def translate_body(state: TranslationState) -> dict:
     progress(f"Translating BODY ({total} chunks)…")
     failed: list[str] = []
     for i, chunk in enumerate(chunks, 1):
+        # Equation-bearing chunks take the sentence-level path: one LLM call
+        # per text segment and per per-symbol legend clause. Equation markers
+        # never go through a single combined translation, so they can't drift
+        # out of position. Pure-prose chunks keep the cheaper single call.
+        if is_equation_bearing(chunk.text):
+            try:
+                en = translate_chunk_by_sentence(
+                    chunk.text,
+                    client,
+                    glossary,
+                    build_segment_messages=build_segment_messages,
+                    build_clause_messages=build_clause_messages,
+                )
+            except Exception as exc:
+                en = None
+                if verbose:
+                    print(
+                        f"  translate_body chunk {chunk.id} (sentence-level): "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+            if en:
+                chunk.translation = _apply_paragraph_id_prefix(chunk, en)
+            else:
+                chunk.translation = ""
+            if not chunk.translation:
+                failed.append(chunk.id)
+            if i % 10 == 0 or i == total:
+                progress(f"  BODY {i}/{total}")
+            if delay > 0:
+                time.sleep(delay)
+            continue
+
         messages = build_body_messages(
             chunk.text,
             glossary,
