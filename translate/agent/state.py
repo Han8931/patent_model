@@ -91,3 +91,6 @@ class TranslationState(TypedDict, total=False):
 
     # diagnostics
     started_at: float
+    # OMML signatures captured at load() time so write() can report whether
+    # any <m:oMath> element got lost / moved / duplicated by the pipeline.
+    math_snapshot: list

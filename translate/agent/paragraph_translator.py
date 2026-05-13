@@ -29,9 +29,10 @@ from __future__ import annotations
 import re
 from typing import Callable
 
-from ..agent.docx_utils import postprocess, replace_text
+from ..agent.docx_utils import extract_all_text, postprocess, replace_text
 from ..agent.glossary import clean_translation_text, extract_json_block, merge_terms
 from .sentence_translator import (
+    _LEGEND_HEADER_RE,
     needs_per_segment_translation,
     translate_chunk_by_sentence,
     translate_text_segment,
@@ -107,7 +108,12 @@ def translate_paragraph_in_place(
     if record.kind == "image":
         return False
     para = record.para
-    raw = record.raw or ""
+    # Re-extract with EVERY <m:oMath> rendered as [EQUATION]. record.raw was
+    # captured at classify time with the inline-symbol shortcut, so short
+    # math objects like 'E_k' or 'x²' were dropped in as raw text — that
+    # would make _replace_text_with_math_placeholders miss them and the
+    # math elements would drift to the end of the paragraph.
+    raw = extract_all_text(para, math_as_placeholder=True)
     if not raw.strip():
         return False
 
@@ -224,3 +230,30 @@ def chunk_has_math(chunk, records) -> bool:
         if _EQUATION_TOKEN_RE.search(r.raw or ""):
             return True
     return False
+
+
+def chunk_has_legend(chunk, records) -> bool:
+    """True when any paragraph in the chunk opens with a Korean parameter
+    legend ('여기서, …' / '상기 …에서, …' / '다만, …').
+
+    These chunks need per-paragraph routing even when they contain no math,
+    because translate_text_segment is the helper that knows how to split a
+    legend into per-symbol clauses.
+    """
+    for idx in chunk.paragraph_indices:
+        if not (0 <= idx < len(records)):
+            continue
+        r = records[idx]
+        if r is None:
+            continue
+        if _LEGEND_HEADER_RE.search(r.raw or ""):
+            return True
+    return False
+
+
+def chunk_needs_per_paragraph(chunk, records) -> bool:
+    """Router predicate used by translate_body. The per-paragraph path is
+    chosen whenever a chunk has math (so equation positions are preserved by
+    construction) OR whenever it has a parameter legend (so the per-symbol
+    clauses are split into individual LLM calls)."""
+    return chunk_has_math(chunk, records) or chunk_has_legend(chunk, records)

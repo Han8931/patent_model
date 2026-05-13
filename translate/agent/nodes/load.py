@@ -14,6 +14,7 @@ import time
 
 from docx import Document
 
+from ..docx_utils import snapshot_math_locations
 from ..state import TranslationState
 
 
@@ -26,8 +27,15 @@ def load(state: TranslationState) -> dict:
     doc = Document(input_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Equation integrity baseline — taken before any node touches the doc, so
+    # the write-end check can report exactly where each math element moved /
+    # whether any was lost or duplicated.
+    math_snapshot = snapshot_math_locations(doc)
+    progress(f"Loaded — {len(math_snapshot)} math element(s) detected for integrity tracking")
+
     return {
         "doc": doc,
         "started_at": time.time(),
         "glossary": {},
+        "math_snapshot": math_snapshot,
     }

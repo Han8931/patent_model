@@ -677,6 +677,35 @@ def write(state: TranslationState) -> dict:
             "Check the LLM connection (LLM_API_KEY, LLM_BASE_URL) and rerun."
         )
 
+    # Equation integrity report. Compares the OMML XML signatures captured at
+    # load() time against the current document. The user can paste this log
+    # without exposing source content — it only carries 10-char md5 hashes,
+    # paragraph indices, and ≤40 chars of equation visible text.
+    from ..docx_utils import verify_math_integrity  # avoid cycle at top
+    snapshot = state.get("math_snapshot") or []
+    if snapshot:
+        report = verify_math_integrity(doc, snapshot)
+        if report["ok"]:
+            progress(f"Equation integrity: OK — {len(snapshot)} math element(s) unchanged.")
+        else:
+            progress(
+                f"Equation integrity WARNING — lost={len(report['lost'])}, "
+                f"moved={len(report['moved'])}, duplicated={len(report['duplicated'])} "
+                f"(of {len(snapshot)} total)."
+            )
+            for orig in report["lost"][:10]:
+                progress(
+                    f"  LOST  sig={orig['sig']} src_para={orig['src_idx']} "
+                    f"text={orig['text']!r}"
+                )
+            for orig, new_idx in report["moved"][:10]:
+                progress(
+                    f"  MOVED sig={orig['sig']} {orig['src_idx']} → {new_idx} "
+                    f"text={orig['text']!r}"
+                )
+            for sig in report["duplicated"][:10]:
+                progress(f"  DUP   sig={sig}")
+
     doc.save(output_path)
     elapsed = time.time() - started_at
     minutes, seconds = divmod(int(elapsed), 60)

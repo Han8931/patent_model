@@ -14,7 +14,7 @@ from ..prompts import (
     build_segment_messages,
 )
 from ..paragraph_translator import (
-    chunk_has_math,
+    chunk_needs_per_paragraph,
     translate_chunk_per_paragraph,
 )
 from ..sentence_translator import (
@@ -85,7 +85,7 @@ def translate_body(state: TranslationState) -> dict:
         # written back into its own <w:p>, with <m:oMath> elements left
         # untouched at their source XML position. The write node skips these
         # chunks because chunk.applied_in_place is set.
-        if chunk_has_math(chunk, indexed_records):
+        if chunk_needs_per_paragraph(chunk, indexed_records):
             try:
                 applied = translate_chunk_per_paragraph(
                     chunk,

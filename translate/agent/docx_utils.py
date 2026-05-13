@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import unicodedata
 from copy import deepcopy
@@ -9,6 +10,11 @@ from copy import deepcopy
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
+
+try:
+    from lxml import etree as _etree
+except ImportError:  # python-docx pulls lxml, but be defensive.
+    import xml.etree.ElementTree as _etree
 
 
 _W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
@@ -73,7 +79,7 @@ def text_runs(para) -> list:
     return [r for r in para.runs if r.text]
 
 
-def extract_all_text(para) -> str:
+def extract_all_text(para, *, math_as_placeholder: bool = False) -> str:
     """Concatenate text from <w:t> and translatable <m:t> in document order.
 
     Korean equation paragraphs often embed Korean labels or 'where ...' clauses
@@ -81,9 +87,17 @@ def extract_all_text(para) -> str:
     Formula-only Word equations are exposed as [EQUATION] placeholders instead
     of raw math symbols so the LLM does not translate or duplicate the formula.
     Use a w:br as a soft separator to mirror Word's visual line breaks.
+
+    ``math_as_placeholder``: when True, ALWAYS render an <m:oMath> element as
+    ``[EQUATION]`` regardless of its length / inline-symbol heuristic. The
+    per-paragraph translator uses this so the writer can interleave text
+    around the math elements at their original XML position; without it,
+    short OMML symbols (like ``E_k`` or ``x²``) get inlined as raw text,
+    no marker is emitted, and ``_replace_text_with_math_placeholders``
+    can't run, so the math drifts to the end of the paragraph.
     """
     parts: list[str] = []
-    _append_translatable_text(para._p, parts)
+    _append_translatable_text(para._p, parts, math_as_placeholder=math_as_placeholder)
     return ''.join(parts)
 
 
@@ -121,7 +135,13 @@ def _is_inline_math_symbol(text: str) -> bool:
     return len(compact) <= 24
 
 
-def _append_translatable_text(el, parts: list[str], state: dict | None = None) -> None:
+def _append_translatable_text(
+    el,
+    parts: list[str],
+    state: dict | None = None,
+    *,
+    math_as_placeholder: bool = False,
+) -> None:
     """Append paragraph text while treating each top-level equation as atomic.
 
     ``state`` carries 'in_field' across the recursion. When a w:fldChar with
@@ -140,6 +160,10 @@ def _append_translatable_text(el, parts: list[str], state: dict | None = None) -
             return
         if _HANGUL_RE.search(math_text):
             parts.append(math_text)
+        elif math_as_placeholder:
+            # Per-paragraph translator path: force a placeholder so the
+            # writer can interleave text around the math element.
+            parts.append(_EQUATION_PLACEHOLDER)
         elif _is_inline_math_symbol(math_text):
             parts.append(math_text)
         else:
@@ -167,7 +191,10 @@ def _append_translatable_text(el, parts: list[str], state: dict | None = None) -
         return
 
     for child in el:
-        _append_translatable_text(child, parts, state)
+        _append_translatable_text(
+            child, parts, state,
+            math_as_placeholder=math_as_placeholder,
+        )
 
 
 def _top_level_math_elements(para) -> list:
@@ -183,6 +210,76 @@ def _top_level_math_elements(para) -> list:
 
     visit(para._p)
     return elements
+
+
+def _omath_xml_signature(el) -> str:
+    """Short hash of an OMML element's full XML — stable identity across moves."""
+    try:
+        xml = _etree.tostring(el, method="xml")
+    except Exception:
+        # Fallback: text content only.
+        xml = _element_text(el).encode("utf-8", "ignore")
+    return hashlib.md5(xml).hexdigest()[:10]
+
+
+def snapshot_math_locations(doc) -> list[dict]:
+    """Capture (signature, paragraph_index, short text) for every <m:oMath>
+    element in the document, in document order.
+
+    Used as a baseline taken right after ``load`` so we can detect at write
+    completion whether any equation got LOST, MOVED to a different paragraph,
+    or DUPLICATED. Signatures are 10-char md5 prefixes of the OMML XML, so
+    the integrity report can name an equation by signature + short text
+    snippet without exposing the full source content of the document.
+    """
+    out: list[dict] = []
+    for idx, p in enumerate(iter_all_paragraphs(doc)):
+        for math in _top_level_math_elements(p):
+            out.append({
+                "sig": _omath_xml_signature(math),
+                "src_idx": idx,
+                "text": _element_text(math)[:40],
+            })
+    return out
+
+
+def verify_math_integrity(doc, snapshot: list[dict]) -> dict:
+    """Compare the current document's math elements against ``snapshot``.
+
+    Returns a dict::
+
+        {
+            "ok":         bool,
+            "lost":       [snapshot rows missing from the output],
+            "duplicated": [list of signatures present more than once now],
+            "moved":      [(snapshot row, new paragraph index)],
+        }
+    """
+    if not snapshot:
+        return {"ok": True, "lost": [], "duplicated": [], "moved": []}
+
+    current: dict[str, list[int]] = {}
+    for idx, p in enumerate(iter_all_paragraphs(doc)):
+        for math in _top_level_math_elements(p):
+            current.setdefault(_omath_xml_signature(math), []).append(idx)
+
+    lost: list[dict] = []
+    duplicated: list[str] = []
+    moved: list[tuple[dict, int]] = []
+    for orig in snapshot:
+        sig = orig["sig"]
+        if sig not in current:
+            lost.append(orig)
+            continue
+        cur_indices = current[sig]
+        if len(cur_indices) > 1:
+            duplicated.append(sig)
+        cur_idx = cur_indices[0]
+        if cur_idx != orig["src_idx"]:
+            moved.append((orig, cur_idx))
+
+    ok = not lost and not duplicated and not moved
+    return {"ok": ok, "lost": lost, "duplicated": list(set(duplicated)), "moved": moved}
 
 
 def extract_math_texts(para) -> list[str]:
