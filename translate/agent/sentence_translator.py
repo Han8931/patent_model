@@ -36,6 +36,15 @@ from .glossary import clean_translation_text, extract_json_block, merge_terms
 
 
 _EQUATION_TOKEN_RE = re.compile(r"\[EQUATION(?:_\d+)?\]")
+# Paragraph-ID markers like '[0075]'. 1–5 digits; we deliberately match anywhere
+# in the text (not just the start) so a line-broken Word paragraph that contains
+# multiple IDs has each ID surface as its own opaque unit during reassembly.
+_PARAGRAPH_ID_INLINE_RE = re.compile(r"\[\d{1,5}\]")
+# Combined matcher used by split_units — recognizes either marker shape so we
+# can route over them in a single pass without worrying about overlap.
+_OPAQUE_MARKER_RE = re.compile(
+    r"(?P<eq>\[EQUATION(?:_\d+)?\])|(?P<pid>\[\d{1,5}\])"
+)
 
 # Korean legend headers: '여기서,', '상기 수학식 N에서,', '다만,', …
 _LEGEND_HEADER_RE = re.compile(
@@ -70,17 +79,21 @@ class Unit:
 
 
 def split_units(chunk_text: str) -> list[Unit]:
-    """Split a chunk's Korean text into alternating TEXT and EQUATION units.
+    """Split a chunk's Korean text into TEXT / EQUATION / PARA_ID units.
 
-    ``[EQUATION_N]`` markers become EQUATION units carrying the marker text
-    verbatim. Everything else (including newlines) becomes TEXT units.
+    Both ``[EQUATION_N]`` (Word-equation placeholder) and ``[NNN]`` (Korean
+    patent paragraph ID — 1–5 digits) become opaque, pass-through units.
+    Everything else (including newlines) becomes a TEXT unit that we translate.
     """
     units: list[Unit] = []
     last = 0
-    for m in _EQUATION_TOKEN_RE.finditer(chunk_text):
+    for m in _OPAQUE_MARKER_RE.finditer(chunk_text):
         if m.start() > last:
             units.append(Unit("text", chunk_text[last:m.start()]))
-        units.append(Unit("equation", m.group(0)))
+        if m.group("eq") is not None:
+            units.append(Unit("equation", m.group("eq")))
+        else:
+            units.append(Unit("para_id", m.group("pid")))
         last = m.end()
     if last < len(chunk_text):
         units.append(Unit("text", chunk_text[last:]))
@@ -195,22 +208,22 @@ def translate_chunk_by_sentence(
     build_segment_messages: Callable[[str, dict], list[dict]],
     build_clause_messages: Callable[[str, str, dict], list[dict]],
 ) -> Optional[str]:
-    """Translate an equation-bearing chunk one unit at a time.
+    """Translate a marker-bearing chunk one unit at a time.
 
-    Returns the assembled English (with ``[EQUATION_N]`` markers preserved
-    in their original positions) on success, or None when no [EQUATION_N]
+    Returns the assembled English (with ``[EQUATION_N]`` and ``[NNN]`` markers
+    preserved in their original positions) on success, or None when no opaque
     markers are present (so the caller can fall back to the chunk-level path).
     """
     units = split_units(chunk_text)
-    if not any(u.kind == "equation" for u in units):
+    if not any(u.kind in ("equation", "para_id") for u in units):
         return None
 
     out_parts: list[str] = []
     for unit in units:
-        if unit.kind == "equation":
-            # Korean doesn't require whitespace before/after a math element;
-            # English does. Insert a space when the previous part doesn't
-            # already end with one so '[EQUATION_1]' stays its own token.
+        if unit.kind in ("equation", "para_id"):
+            # Korean doesn't require whitespace before a math element or
+            # paragraph ID; English does. Insert a space when the previous
+            # part doesn't already end with whitespace.
             if out_parts and not out_parts[-1].endswith((" ", "\t", "\n")):
                 out_parts.append(" ")
             out_parts.append(unit.payload)
@@ -233,3 +246,22 @@ def translate_chunk_by_sentence(
 
 def is_equation_bearing(chunk_text: str) -> bool:
     return bool(_EQUATION_TOKEN_RE.search(chunk_text))
+
+
+def has_inline_paragraph_id(chunk_text: str) -> bool:
+    """True when the chunk text has a '[NNN]' paragraph ID *inside* it.
+
+    Used to detect line-break-induced multi-paragraph chunks: chunk_body
+    already strips a single HEAD '[NNN]' into ``chunk.paragraph_id_prefix``,
+    so any '[NNN]' that survives into the chunk text came from a `<w:br>`
+    in the source — that's the line-breaking case that needs sentence-level
+    splitting so each '[NNN]' stays adjacent to its own body content.
+    """
+    return bool(_PARAGRAPH_ID_INLINE_RE.search(chunk_text))
+
+
+def needs_per_segment_translation(chunk_text: str) -> bool:
+    """Combined router: send through the sentence-level path when the chunk
+    has either inline equations or extra paragraph IDs surviving the head
+    strip."""
+    return is_equation_bearing(chunk_text) or has_inline_paragraph_id(chunk_text)

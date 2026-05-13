@@ -14,7 +14,7 @@ from ..prompts import (
     build_segment_messages,
 )
 from ..sentence_translator import (
-    is_equation_bearing,
+    needs_per_segment_translation,
     translate_chunk_by_sentence,
 )
 from ..state import Chunk, TranslationState
@@ -63,11 +63,13 @@ def translate_body(state: TranslationState) -> dict:
     progress(f"Translating BODY ({total} chunks)…")
     failed: list[str] = []
     for i, chunk in enumerate(chunks, 1):
-        # Equation-bearing chunks take the sentence-level path: one LLM call
-        # per text segment and per per-symbol legend clause. Equation markers
-        # never go through a single combined translation, so they can't drift
-        # out of position. Pure-prose chunks keep the cheaper single call.
-        if is_equation_bearing(chunk.text):
+        # Chunks containing opaque markers ([EQUATION_N] or inline [NNN]
+        # paragraph IDs from <w:br> line breaks) take the sentence-level path:
+        # one LLM call per text segment and per per-symbol legend clause. The
+        # markers never go through a single combined translation, so they
+        # can't drift out of position or get glued together at the start.
+        # Pure-prose chunks keep the cheaper single call.
+        if needs_per_segment_translation(chunk.text):
             try:
                 en = translate_chunk_by_sentence(
                     chunk.text,
