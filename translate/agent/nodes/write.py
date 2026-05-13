@@ -223,16 +223,16 @@ def _candidate_match_keys(sym: str) -> set[str]:
 # Hanging-indent separator used when the redistribution helpers rebuild a
 # per-parameter clause list from individual clauses. After the head-keyword
 # ('where' / 'wherein'), the first clause sits on the same line, and each
-# subsequent clause goes on its own indented line:
+# subsequent clause goes on its own tab-indented line:
 #
 #     ..., where A is a thickness;
 #         B is a width;
 #         C is a height.
 #
-# Matches the patent-style hanging indent that ``_break_after_semicolons``
-# applies to plain LLM output. ``write_run_with_breaks`` later splits this
-# string on '\n' to emit <w:br/> elements with xml:space="preserve" runs.
-_CLAUSE_SEP = ";\n    "
+# Matches the tab-indent style ``_break_after_semicolons`` applies to plain
+# LLM output. ``write_run_with_breaks`` splits this string on '\n' to emit
+# <w:br/> elements, and converts each leading '\t' into a <w:tab/> element.
+_CLAUSE_SEP = ";\n\t"
 
 
 def _format_legend_clauses(pairs: list[tuple[str, str]]) -> str:

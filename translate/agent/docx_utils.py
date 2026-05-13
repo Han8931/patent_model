@@ -248,21 +248,38 @@ def consolidate_formula_math_into(target_para, source_paras) -> int:
     return moved
 
 
+def _append_line_to_run(r, part: str) -> None:
+    """Append one logical line of text to an existing <w:r>.
+
+    Leading tab characters become real ``<w:tab/>`` elements so Word
+    respects tab stops; the remainder goes into ``<w:t>`` with
+    ``xml:space="preserve"`` whenever it has leading or trailing spaces
+    so the XML parser doesn't collapse them.
+    """
+    tab_count = 0
+    while part.startswith('\t'):
+        tab_count += 1
+        part = part[1:]
+    for _ in range(tab_count):
+        r.append(OxmlElement('w:tab'))
+    t = OxmlElement('w:t')
+    if part.startswith(' ') or part.endswith(' '):
+        t.set(_XML_SPACE, 'preserve')
+    t.text = part
+    r.append(t)
+
+
 def write_run_with_breaks(run, text: str, font_name: str) -> None:
-    """Replace run content; convert \\n into <w:br/> elements."""
+    """Replace run content; convert \\n into <w:br/> and leading \\t into <w:tab/>."""
     r = run._r
     for child in list(r):
         local = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-        if local in ('t', 'br'):
+        if local in ('t', 'br', 'tab'):
             r.remove(child)
 
     parts = text.split('\n')
     for idx, part in enumerate(parts):
-        t = OxmlElement('w:t')
-        if part.startswith(' ') or part.endswith(' '):
-            t.set(_XML_SPACE, 'preserve')
-        t.text = part
-        r.append(t)
+        _append_line_to_run(r, part)
         if idx < len(parts) - 1:
             r.append(OxmlElement('w:br'))
 
@@ -280,11 +297,7 @@ def _build_text_run(text: str, font_name: str):
 
     parts = text.split('\n')
     for idx, part in enumerate(parts):
-        t = OxmlElement('w:t')
-        if part.startswith(' ') or part.endswith(' '):
-            t.set(_XML_SPACE, 'preserve')
-        t.text = part
-        new_r.append(t)
+        _append_line_to_run(new_r, part)
         if idx < len(parts) - 1:
             new_r.append(OxmlElement('w:br'))
     return new_r
@@ -499,11 +512,11 @@ def _break_sentences(text: str) -> str:
 
 
 # Indentation applied to every line that begins after a ';'-break in claim
-# element lists and parameter legends. Four spaces matches typical patent
-# drafting style ("A device comprising:\n    a substrate;\n    a layer; …").
-# Leading-space preservation is handled by write_run_with_breaks, which sets
-# xml:space="preserve" automatically when a run starts with whitespace.
-_SEMICOLON_INDENT = "    "
+# element lists and parameter legends. One tab character matches typical
+# patent drafting style. The tab is emitted as a real ``<w:tab/>`` element
+# by ``_build_text_run`` / ``write_run_with_breaks`` (Word's proper tab
+# semantic) rather than as a literal whitespace character in ``<w:t>``.
+_SEMICOLON_INDENT = "\t"
 
 
 def _break_after_semicolons(text: str) -> str:
