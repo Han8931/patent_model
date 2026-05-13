@@ -36,15 +36,30 @@ from ..state import Chunk, TranslationState
 
 _HANGUL_RE = re.compile(r'[가-힯]')
 
+# USPTO style: dependent claims that add new elements must use the exact phrase
+# 'further comprising'. The LLM regularly slips into 'further include[d|s|ing]'
+# or 'further contain[ed|ing|s]'; rewrite those to the canonical form. Match is
+# word-boundary so we don't touch ordinary 'further' usage in body prose.
+_FURTHER_INCLUDE_RE = re.compile(
+    r"\bfurther\s+(?:includ(?:ed|ing|es)|contain(?:ed|ing|s))\b",
+    re.IGNORECASE,
+)
+
+
+def _enforce_further_comprising(text: str) -> str:
+    return _FURTHER_INCLUDE_RE.sub("further comprising", text)
+
 
 def _contains_hangul(text: str | None) -> bool:
     return bool(text and _HANGUL_RE.search(text))
 
 
 def _format_translation(claim_num: int, raw_text: str) -> str:
-    """Strip LLM-added claim numbers, lowercase after ';'/':',  prepend 'N. '."""
+    """Strip LLM-added claim numbers, lowercase after ';'/':', enforce
+    'further comprising' for added-element dependent claims, prepend 'N. '."""
     text = LLM_CLAIM_PREFIX_RE.sub('', raw_text.strip())
     text = re.sub(r'(?<=[;:])\n([A-Z])', _lower_claim_element_initial, text)
+    text = _enforce_further_comprising(text)
     return f"{claim_num}. {text}"
 
 
