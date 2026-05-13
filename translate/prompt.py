@@ -70,6 +70,52 @@ _HEADING_RULES = (
     "- Remove '【】' characters; output heading as plain text.\n"
 )
 
+
+# ---------------------------------------------------------------------------
+# Antecedent basis — strict USPTO article usage. Korean has no articles, so
+# every noun phrase in the English output needs an article decided on a
+# *mechanical* rule: 'a/an' on first mention, 'the' on every later mention of
+# the same noun. This is one of the most common drafting errors in machine-
+# translated Korean patents and is worth its own rule block with concrete
+# BAD/GOOD examples.
+# ---------------------------------------------------------------------------
+_ANTECEDENT_RULES = (
+    "\n"
+    "ANTECEDENT BASIS — MECHANICAL ARTICLE USAGE (CRITICAL):\n"
+    "English patents use articles by a STRICT rule, not by stylistic judgment:\n"
+    "- FIRST mention of any countable noun phrase in this document: introduce\n"
+    "  it with 'a' or 'an'. This is how the noun gains antecedent basis.\n"
+    "- EVERY SUBSEQUENT mention of THAT SAME noun (or one that is clearly the\n"
+    "  same instance): refer back with 'the'.\n"
+    "- The choice 'a/an' vs 'the' is MECHANICAL: it depends only on whether the\n"
+    "  noun has appeared earlier, not on emphasis or style.\n"
+    "- The ESTABLISHED TERMINOLOGY block below lists Korean → English terms that\n"
+    "  already appeared in earlier chunks. Treat each of those as ALREADY\n"
+    "  INTRODUCED: use 'the' (or possessives like 'its', 'their') on every\n"
+    "  occurrence in this chunk, NEVER 'a/an'.\n"
+    "- A noun NOT in that block, appearing for the first time, takes 'a/an'\n"
+    "  on its FIRST mention in this chunk, then 'the' on every later mention\n"
+    "  within the same chunk.\n"
+    "- Plural and mass nouns: use 'the' on subsequent mention; bare plurals/\n"
+    "  mass nouns are acceptable on first mention when the source is generic\n"
+    "  ('layers may include …').\n"
+    "\n"
+    "Examples:\n"
+    "  BAD : 'The semiconductor device includes the substrate.'\n"
+    "        (no antecedent for 'the substrate'; first mention should be 'a')\n"
+    "  BAD : 'The device includes a substrate. A substrate is silicon.'\n"
+    "        (second mention should be 'the', not 'a')\n"
+    "  BAD : 'A substrate may be silicon. A first layer is on a substrate.'\n"
+    "        ('substrate' mentioned twice — second 'a' should be 'the')\n"
+    "  GOOD: 'The device includes a substrate, a first layer, and a contact.\n"
+    "         The substrate may be silicon. The first layer is disposed on\n"
+    "         the substrate.'\n"
+    "  GOOD (term in ESTABLISHED TERMINOLOGY):\n"
+    "        'The semiconductor device further includes a second contact on\n"
+    "         the semiconductor device's upper surface.'  ← 'the' because\n"
+    "         the term has already been introduced in an earlier chunk.\n"
+)
+
 COMMON_SYSTEM = (
     "You are a professional patent translation engine (Korean → English).\n"
     "Your output will be used in an English patent application.\n"
@@ -82,6 +128,7 @@ COMMON_SYSTEM = (
     + _BRACKET_RULES
     + _HEADING_RULES
     + _STYLE_RULES
+    + _ANTECEDENT_RULES
 )
 
 # ---------------------------------------------------------------------------

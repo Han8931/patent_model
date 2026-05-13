@@ -106,11 +106,24 @@ _COMBINED_LEGEND_INSTRUCTION = (
 
 
 def _system_with_glossary(prompt: Prompt, glossary: dict[str, str]) -> str:
-    """Inject the rolling glossary into the system message."""
+    """Inject the rolling glossary into the system message.
+
+    The glossary doubles as the antecedent-basis ledger: every entry is a
+    noun phrase that was already introduced earlier in the document. The
+    block label tells the LLM to (a) reuse the exact English wording, AND
+    (b) treat every occurrence as already-introduced — i.e. use 'the' (or
+    a possessive) rather than 'a/an' on every mention in this chunk.
+    """
     block = format_for_prompt(glossary)
     return prompt.system + (
         "\n"
-        "ESTABLISHED TERMINOLOGY (reuse these EXACT English terms when the corresponding Korean term appears):\n"
+        "ESTABLISHED TERMINOLOGY (Korean → English).\n"
+        "Every term in this list has ALREADY BEEN INTRODUCED in an earlier\n"
+        "chunk of this document, so within the current chunk:\n"
+        "  - Reuse the EXACT English wording shown — do not paraphrase or\n"
+        "    pluralize differently.\n"
+        "  - Use 'the' (or a possessive) on every occurrence — NEVER 'a/an',\n"
+        "    because these nouns are no longer first-mention.\n"
         f"{block}\n"
     )
 
