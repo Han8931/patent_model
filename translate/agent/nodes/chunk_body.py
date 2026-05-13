@@ -31,14 +31,23 @@ _CONTINUATION_TAILS = (":", ",")
 _EQUATION_TOKEN_RE = re.compile(r'\[EQUATION(?:_\d+)?\]')
 
 # Paragraph-ID prefix: '[001]', '[12]', '[0016]', etc. at the start of a
-# paragraph's text. 1–5 digits, optional whitespace after.
-_PARAGRAPH_ID_RE = re.compile(r'^\[(\d{1,5})\]\s*')
+# paragraph's text. 1–5 digits, optional whitespace before AND after.
+#
+# Leading whitespace tolerance matters: extract_all_text can emit text such as
+# ' [0132] body…' when the source Word doc puts a stray space, tab, or NBSP
+# inside the first w:t run before the bracket. If the regex anchors strictly
+# at position 0, _has_paragraph_id returns False for that paragraph and
+# chunk_body silently merges it into the previous one — so '[0131]' ends up
+# with '[0131][0132] …' in its paragraph and the [0132] paragraph's body
+# content disappears.
+_PARAGRAPH_ID_RE = re.compile(r'^[\s ]*\[(\d{1,5})\][\s ]*', re.UNICODE)
 
 
 def _strip_paragraph_id(text: str) -> tuple[str, str | None]:
-    """If ``text`` starts with a '[NNN]' paragraph ID, return (rest, prefix).
-    Otherwise return (text, None). The prefix returned keeps the original
-    bracket form so it can be re-injected verbatim onto the translation."""
+    """If ``text`` starts with a '[NNN]' paragraph ID (after any leading
+    whitespace), return (rest_after_marker, '[NNN]'). Otherwise return
+    (text, None). The prefix returned keeps the original digit form so it
+    can be re-injected verbatim onto the translation."""
     m = _PARAGRAPH_ID_RE.match(text)
     if not m:
         return text, None
