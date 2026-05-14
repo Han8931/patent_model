@@ -170,6 +170,15 @@ def _append_translatable_text(
             parts.append(_EQUATION_PLACEHOLDER)
         return
 
+    if _is_inline_image_run(el):
+        # Image-equation: <w:r><w:drawing>...</w:drawing></w:r>. Treat the
+        # whole run as one [EQUATION] marker so the LLM keeps a placeholder
+        # in the right relative position and the writer can reinsert text
+        # around the run.
+        if state["in_field"] == 0:
+            parts.append(_EQUATION_PLACEHOLDER)
+        return
+
     local = _local_name(el)
     if local == 'fldChar':
         # w:fldChar attribute is in the WordprocessingML namespace.
@@ -210,6 +219,45 @@ def _top_level_math_elements(para) -> list:
 
     visit(para._p)
     return elements
+
+
+def _is_inline_image_run(el) -> bool:
+    """True iff ``el`` is a <w:r> run containing an inline <w:drawing>.
+
+    Image-equations in patents are commonly stored as PNG/JPG inside a
+    <w:r><w:drawing>...</w:drawing></w:r>. Treating these runs as opaque
+    atoms (same as <m:oMath>) lets us emit [EQUATION] markers for them and
+    preserve their position when text is written back.
+    """
+    if _local_name(el) != 'r':
+        return False
+    return el.find('.//{%s}drawing' % _W) is not None
+
+
+def _top_level_inline_atoms(para) -> list:
+    """Top-level positional atoms in document order: <m:oMath> and
+    <m:oMathPara> for OMML equations, plus <w:r> wrappers holding inline
+    <w:drawing> images for image-based equations.
+
+    Each returned element becomes an anchor for text insertion: surrounding
+    text is added via ``addprevious`` / ``addnext`` so the atom never moves.
+    """
+    atoms: list = []
+
+    def visit(el, inside_atom: bool = False) -> None:
+        if _is_math_element(el):
+            if not inside_atom:
+                atoms.append(el)
+            return  # never recurse into math
+        if _is_inline_image_run(el):
+            if not inside_atom:
+                atoms.append(el)
+            return  # never recurse into the run holding a drawing
+        for child in el:
+            visit(child, inside_atom)
+
+    visit(para._p)
+    return atoms
 
 
 def _omath_xml_signature(el) -> str:
@@ -401,41 +449,63 @@ def _build_text_run(text: str, font_name: str):
 
 
 def _replace_text_with_math_placeholders(para, new_text: str, font_name: str) -> bool:
-    formula_math = [
-        el for el in _top_level_math_elements(para)
-        if not _HANGUL_RE.search(_element_text(el))
-    ]
-    if not formula_math or not _EQUATION_TOKEN_RE.search(new_text):
+    """Replace paragraph text while keeping every inline atom at its source
+    XML position.
+
+    Atoms are <m:oMath> elements AND <w:r> runs holding <w:drawing> (image-
+    based equations). The new_text is expected to carry one [EQUATION] /
+    [EQUATION_N] marker per atom; the markers split the translation into
+    segments that are inserted via ``addprevious`` / ``addnext`` around each
+    atom. Math elements containing Hangul labels are excluded (those are
+    handled by ``_remove_korean_math``); image-runs are always included.
+    """
+    atoms: list = []
+    only_math: list = []  # subset used for variable-aware redistribution
+    for el in _top_level_inline_atoms(para):
+        if _is_math_element(el):
+            if _HANGUL_RE.search(_element_text(el)):
+                continue
+            only_math.append(el)
+            atoms.append(el)
+        else:
+            atoms.append(el)  # image-equation run — no variables, no filter
+
+    if not atoms or not _EQUATION_TOKEN_RE.search(new_text):
         return False
 
-    parts = _EQUATION_TOKEN_RE.split(new_text, maxsplit=len(formula_math))
+    parts = _EQUATION_TOKEN_RE.split(new_text, maxsplit=len(atoms))
     if len(parts) < 2:
         return False
-    while len(parts) < len(formula_math) + 1:
+    while len(parts) < len(atoms) + 1:
         parts.append('')
     parts = [_EQUATION_TOKEN_RE.sub('', part) for part in parts]
 
     # When the LLM grouped every [EQUATION_N] marker together so all the
     # parameter clauses ended up in one slot, parse the description and
     # reassign clauses to math elements by symbol matching. Lazy import to
-    # break the docx_utils ↔ nodes.write cycle (write imports docx_utils
-    # at module load time; the redistribute helper lives there).
-    if len(formula_math) >= 2:
+    # break the docx_utils ↔ nodes.write cycle. Only math elements carry
+    # variables — image-runs don't, so redistribution applies only when at
+    # least two math elements are present.
+    if len(only_math) >= 2 and len(only_math) == len(atoms):
         from .nodes.write import _redistribute_inline_math
-        parts = _redistribute_inline_math(parts, formula_math)
+        parts = _redistribute_inline_math(parts, only_math)
 
-    # Clear existing normal text. The equation XML remains in its original spot.
+    # Clear existing normal text. Atom elements (math XML, drawing runs)
+    # remain in their original spots so positioning is preserved.
+    atom_runs = {a for a in atoms if _is_inline_image_run(a)}
     for run in para.runs:
+        if run._r in atom_runs:
+            continue  # don't blank the run that holds the image equation
         write_run_with_breaks(run, '', font_name)
 
-    for idx, math_el in enumerate(formula_math):
+    for idx, anchor in enumerate(atoms):
         before = parts[idx]
         if before:
-            math_el.addprevious(_build_text_run(before, font_name))
+            anchor.addprevious(_build_text_run(before, font_name))
 
-    after = parts[len(formula_math)]
+    after = parts[len(atoms)]
     if after:
-        formula_math[-1].addnext(_build_text_run(after, font_name))
+        atoms[-1].addnext(_build_text_run(after, font_name))
     return True
 
 
