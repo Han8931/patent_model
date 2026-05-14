@@ -24,6 +24,7 @@ import time
 from ..claim_classifier import (
     PreambleSpec,
     build_dependent_preamble,
+    dependent_adds_subject_matter,
     extract_preamble,
     method_dependent_connective,
 )
@@ -197,7 +198,13 @@ def _dependent_opening(
         chunk.parent_claim_nums,
         chunk.multi_parent_kind,
     )
-    if chunk.claim_kind == "method" and method_connective == "further comprising":
+    if (
+        chunk.claim_kind == "method"
+        and method_connective == "further comprising"
+    ) or (
+        chunk.claim_kind in {"device", "system"}
+        and dependent_adds_subject_matter(chunk.text)
+    ):
         return f"{preamble}, further comprising"
     return f"{preamble}, wherein"
 
@@ -288,7 +295,10 @@ def _translate_one(
                     text = _enforce_dependent_preamble(
                         text, required_dependent_opening
                     )
-                formatted = _format_translation(chunk.claim_num, postprocess(text))
+                formatted = _format_translation(
+                    chunk.claim_num,
+                    postprocess(text, claim_format=True),
+                )
                 if _contains_hangul(formatted):
                     last_problem = "The formatted claim still contains Korean/Hangul text."
                 else:

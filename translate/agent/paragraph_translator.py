@@ -29,7 +29,12 @@ from __future__ import annotations
 import re
 from typing import Callable
 
-from ..agent.docx_utils import extract_all_text, postprocess, replace_text
+from ..agent.docx_utils import (
+    extract_all_text,
+    extract_math_texts,
+    postprocess,
+    replace_text,
+)
 from ..agent.glossary import clean_translation_text, extract_json_block, merge_terms
 from .sentence_translator import (
     _LEGEND_HEADER_RE,
@@ -66,6 +71,25 @@ def _number_equation_placeholders(text: str, start_n: int = 1) -> str:
     # Use the bare-placeholder regex to avoid double-numbering an existing
     # '[EQUATION_3]' (which already has a number).
     return re.sub(r"\[EQUATION\](?!_)", repl, text)
+
+
+def _replace_inline_symbols_with_markers(text: str, record) -> str:
+    """Replace visible inline Word-math symbols in translated text with markers.
+
+    Parameter legend translation needs to see symbols like ``α² + 1/2`` so the
+    symbol-description pairing stays intact. ``replace_text`` still needs
+    ``[EQUATION_N]`` anchors to keep the actual Word math XML in place. This
+    bridge swaps the first translated occurrence of each source math symbol
+    back to its corresponding marker just before writing.
+    """
+    out = text
+    for idx, symbol in enumerate(extract_math_texts(record.para), 1):
+        marker = f"[EQUATION_{idx}]"
+        if marker in out:
+            continue
+        if symbol:
+            out = out.replace(symbol, marker, 1)
+    return out
 
 
 def _simple_translate(
@@ -108,12 +132,18 @@ def translate_paragraph_in_place(
     if record.kind == "image":
         return False
     para = record.para
-    # Re-extract with EVERY <m:oMath> rendered as [EQUATION]. record.raw was
-    # captured at classify time with the inline-symbol shortcut, so short
-    # math objects like 'E_k' or 'x²' were dropped in as raw text — that
-    # would make _replace_text_with_math_placeholders miss them and the
-    # math elements would drift to the end of the paragraph.
-    raw = extract_all_text(para, math_as_placeholder=True)
+    # Inline parameter legends must expose their symbols to the clause
+    # translator; other mixed paragraphs use placeholders so the writer can
+    # interleave text around math elements without moving them.
+    raw_with_symbols = extract_all_text(para)
+    use_symbol_legend = bool(getattr(record, "mixed", False)) and bool(
+        _LEGEND_HEADER_RE.search(raw_with_symbols)
+    )
+    raw = (
+        raw_with_symbols
+        if use_symbol_legend
+        else extract_all_text(para, math_as_placeholder=True)
+    )
     if not raw.strip():
         return False
 
@@ -122,7 +152,11 @@ def translate_paragraph_in_place(
 
     # Renumber any bare '[EQUATION]' to '[EQUATION_1..N]' so the sentence
     # translator can split on stable, distinct markers.
-    numbered = _number_equation_placeholders(stripped)
+    numbered = (
+        stripped
+        if use_symbol_legend
+        else _number_equation_placeholders(stripped)
+    )
 
     if needs_per_segment_translation(numbered):
         # Inline equations OR inline [NNN] markers — sentence-level path
@@ -157,6 +191,8 @@ def translate_paragraph_in_place(
         en = f"{id_prefix} {en.lstrip()}"
 
     en = postprocess(en)
+    if use_symbol_legend:
+        en = _replace_inline_symbols_with_markers(en, record)
 
     # Apply in-place. For a mixed paragraph (text + inline math),
     # ``replace_text`` routes through ``_replace_text_with_math_placeholders``

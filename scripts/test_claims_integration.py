@@ -84,6 +84,7 @@ class StubClient:
 
     def __init__(self):
         self.call_log: list[tuple[int, str]] = []
+        self.claim_system_prompts: list[str] = []
 
     def complete(self, messages):
         user = messages[1]["content"]
@@ -119,6 +120,7 @@ class StubClient:
             return json.dumps(plans[num])
 
         # Extract claim number from "Translate Korean claim N (..."
+        self.claim_system_prompts.append(messages[0]["content"])
         head = user.split(" into ONE")[0]
         num = int(head.split("claim ")[1].split(" ")[0])
         self.call_log.append((num, head))
@@ -166,6 +168,13 @@ def main() -> None:
         print(f"[{c.claim_num}] kind={c.claim_kind} indep={c.is_independent} "
               f"noun_phrase={c.noun_phrase!r}")
         print(f"     → {c.translation!r}")
+
+    by_num = {c.claim_num: c for c in chunks}
+    assert by_num[10].translation == (
+        "10. The semiconductor device of claim 2, further comprising an encapsulant."
+    )
+    assert all("DOCUMENT TERMINOLOGY" in p for p in stub.claim_system_prompts)
+    assert not any("Every term in this list has ALREADY" in p for p in stub.claim_system_prompts)
 
 
 if __name__ == "__main__":

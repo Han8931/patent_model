@@ -54,15 +54,14 @@ _LEGEND_HEADER_RE = re.compile(
 
 # Boundary at the start of each '<sym>는' / '<sym>은' clause inside a legend.
 # Symbol shape allows any Unicode letter (covers Latin/Greek/math-italic) or
-# one of the math-bracket-start chars '〖 ( [' as the first char, then up to
-# 40 non-whitespace, non-clause-boundary characters. Boundary characters that
-# can precede a new symbol: start-of-string, ASCII/fullwidth comma, ASCII/
-# fullwidth semicolon, ASCII/fullwidth period, or one of the Korean
-# clause-end copulas '이고' / '이며'.
+# one of the math-bracket-start chars '〖 ( [' as the first char, then a short
+# inline expression such as 'α² + 1/2'. Boundary characters that can precede a
+# new symbol: start-of-string, ASCII/fullwidth comma, ASCII/fullwidth semicolon,
+# ASCII/fullwidth period, or one of the Korean clause-end copulas '이고' / '이며'.
 _CLAUSE_BOUNDARY_RE = re.compile(
     r"(?:^|[,，;；。\.]\s*|(?:이고|이며)[,，]?\s*)"
     r"(?P<sym>(?:[^\W\d_]|[〖\(\[])"
-    r"[^\s,;，；。\n]{0,40})"
+    r"(?:(?!\s*(?:는|은)\s+)[^,;，；。\n]){0,80}?)"
     r"\s*(?:는|은)\s+",
     re.UNICODE,
 )

@@ -54,6 +54,17 @@ def make_input(path: Path) -> None:
 class EquationAwareStub:
     def complete(self, messages):
         user = messages[-1]["content"]
+        if "제어부는 다음 수학식을 이용하여 값을 산출한다" in user:
+            return json.dumps({
+                "text": "The controller calculates a value using the following equation:",
+                "key_terms": [],
+            })
+        if "Symbol: 'A'" in user:
+            return json.dumps({"text": "A is an output value", "key_terms": []})
+        if "Symbol: 'B'" in user:
+            return json.dumps({"text": "B is a first input value", "key_terms": []})
+        if "Symbol: 'C'" in user:
+            return json.dumps({"text": "C is a second input value", "key_terms": []})
         if "[EQUATION_1]" in user:
             return json.dumps({
                 "text": (
@@ -97,7 +108,8 @@ def main() -> None:
     assert interesting[0][1] == "The controller calculates a value using the following equation:"
     assert interesting[1][0] == "EQ"
     assert interesting[1][2] == WD_ALIGN_PARAGRAPH.CENTER
-    assert interesting[2][1].startswith((", where A is an output value;", "where A is an output value;", "wherein A is an output value;"))
+    assert interesting[2][1].startswith(("where A is an output value;", "wherein A is an output value;"))
+    assert "\n\t" not in interesting[2][1]
     assert not any(any("가" <= ch <= "힣" for ch in text) for _, text, _ in interesting)
 
     print("body standalone equation layout: ok")

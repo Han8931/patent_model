@@ -171,7 +171,7 @@ def make_revise(kind: SectionKind) -> Callable[[TranslationState], dict]:
                         text,
                         claim_specs,
                     )
-                    text = postprocess(text)
+                    text = postprocess(text, claim_format=True)
                     if _contains_hangul(text):
                         if verbose:
                             claim_num = translated_chunks[idx].claim_num

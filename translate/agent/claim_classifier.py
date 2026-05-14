@@ -194,16 +194,34 @@ def detect_kind(text: str, *, default: ClaimKind = "device") -> ClaimKind:
 # Method-dependent connective (wherein vs further comprising)
 # ---------------------------------------------------------------------------
 
-_FURTHER_COMPRISING_RE = re.compile(
-    r'(?:단계[를을]?\s*)?더\s*포함|를\s*더\s*포함하는|더\s*포함하는\s*단계'
+_ADDITION_CUE_RE = re.compile(
+    r'(?:더|추가로|추가적으로|부가적으로|또한|나아가)\s*'
+    r'(?:포함|구비|제공|배치|형성|저장|수행|실행)|'
+    r'(?:을|를)\s*(?:더|추가로|추가적으로|부가적으로|또한|나아가)\s*'
+    r'(?:포함|구비)|'
+    r'(?:단계|구성|요소|부재|층|막|전극|패턴|영역|모듈|회로|명령어)'
+    r'(?:을|를)?\s*(?:더|추가로|추가적으로|부가적으로|또한|나아가)\s*'
+    r'(?:포함|구비)'
 )
 
 
 def method_dependent_connective(korean_text: str) -> str:
     """Pick 'further comprising' vs 'wherein' for a method dependent claim."""
-    if _FURTHER_COMPRISING_RE.search(korean_text):
+    if _ADDITION_CUE_RE.search(korean_text):
         return "further comprising"
     return "wherein"
+
+
+def dependent_adds_subject_matter(korean_text: str) -> bool:
+    """True when a dependent claim appears to add a new element/step.
+
+    Korean dependent claims usually signal an added limitation with words like
+    "더", "추가로", "부가적으로", "또한", or "나아가" near inclusion/provision
+    verbs. Bare "포함하는" is intentionally not enough, because phrases such as
+    "상기 전극은 금속을 포함하는" refine an existing element and should remain a
+    wherein clause.
+    """
+    return bool(_ADDITION_CUE_RE.search(korean_text))
 
 
 # ---------------------------------------------------------------------------

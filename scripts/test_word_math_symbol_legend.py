@@ -46,6 +46,25 @@ class WordMathStub:
                 ),
                 "key_terms": [],
             })
+        if "제어부는 다음 수학식들을 이용하여 출력값을 산출한다" in user:
+            return json.dumps({
+                "text": (
+                    "The controller calculates an output value using the following "
+                    "mathematical expressions:"
+                ),
+                "key_terms": [],
+            })
+        body_clauses = {
+            "제1 복합 가중치": "α² + 1/2 is a first composite weight",
+            "제2 복합 가중치": "β + γ/2 is a second composite weight",
+            "보정 함수": "γ² − α is a correction function",
+            "제1 입력값": "X₁ is a first input value",
+            "제2 입력값": "Y₂ is a second input value",
+            "제3 입력값": "Z₃ is a third input value",
+        }
+        for korean, text in body_clauses.items():
+            if korean in user:
+                return json.dumps({"text": text, "key_terms": []})
         if "[EQUATION_1]" in user and "α² + 1/2는" in user:
             return json.dumps({
                 "text": (
@@ -90,7 +109,7 @@ def main() -> None:
 
     out = Document(dst)
     texts = [(p.text or "").strip() for p in out.paragraphs]
-    all_text = "\n".join(texts)
+    all_text = "\n".join(extract_all_text(p).strip() for p in out.paragraphs)
     assert "A₁ + B₂/2 is a first combined input value" in all_text
     assert "B₂ − C is a second combined input value" in all_text
     assert "C² + 1/2 is a correction value" in all_text
@@ -100,12 +119,13 @@ def main() -> None:
 
     body_sequence = []
     for p in out.paragraphs[:9]:
-        text = (p.text or "").strip()
-        if has_math(p) and not text:
+        text = extract_all_text(p).strip()
+        if has_math(p) and text == "[EQUATION]":
             body_sequence.append("EQ")
         elif text.startswith((", where α²", "wherein α²", "where α²")):
             body_sequence.append("ALPHA")
     assert body_sequence[:4] == ["EQ", "EQ", "EQ", "ALPHA"], body_sequence
+    assert not any("\n\t" in text for text in texts[:7])
 
     # The output should not contain a separate math-only paragraph made from
     # grouped legend symbols A/B/C.

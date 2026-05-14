@@ -971,13 +971,14 @@ def _strip_reference_parens(text: str) -> str:
     return text
 
 
-def postprocess(text: str) -> str:
+def postprocess(text: str, *, claim_format: bool = False) -> str:
     text = _normalize_unicode(text)
     text = _expand_respectively(text)
     text = _repair_malformed_semicolon_legend(text)
     text = _strip_articles_on_plurals(text)
     text = _strip_reference_parens(text)
-    text = _break_sentences(text)
-    text = _break_after_semicolons(text)
-    text = _indent_after_colon(text)
+    if claim_format:
+        text = _break_sentences(text)
+        text = _break_after_semicolons(text)
+        text = _indent_after_colon(text)
     return text

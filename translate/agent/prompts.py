@@ -17,6 +17,7 @@ from .claim_classifier import (
     MultiParent,
     PreambleSpec,
     build_dependent_preamble,
+    dependent_adds_subject_matter,
     format_parent_reference,
 )
 from .glossary import format_for_prompt
@@ -105,16 +106,34 @@ _COMBINED_LEGEND_INSTRUCTION = (
 )
 
 
-def _system_with_glossary(prompt: Prompt, glossary: dict[str, str]) -> str:
+def _system_with_glossary(
+    prompt: Prompt,
+    glossary: dict[str, str],
+    *,
+    claim_context: bool = False,
+) -> str:
     """Inject the rolling glossary into the system message.
 
-    The glossary doubles as the antecedent-basis ledger: every entry is a
-    noun phrase that was already introduced earlier in the document. The
-    block label tells the LLM to (a) reuse the exact English wording, AND
-    (b) treat every occurrence as already-introduced — i.e. use 'the' (or
-    a possessive) rather than 'a/an' on every mention in this chunk.
+    For specification/body chunks, the glossary also acts as an antecedent
+    ledger for earlier prose. For claims, it is terminology-only: terms from
+    the description do not create claim antecedent basis.
     """
     block = format_for_prompt(glossary)
+    if claim_context:
+        return prompt.system + (
+            "\n"
+            "DOCUMENT TERMINOLOGY (Korean → English).\n"
+            "Use this list ONLY to keep the same Korean technical term translated\n"
+            "with the same English noun phrase throughout the document.\n"
+            "IMPORTANT FOR CLAIM ARTICLES:\n"
+            "  - A term appearing in the DESCRIPTION, ABSTRACT, or DRAWINGS does\n"
+            "    NOT make that term already introduced in the CLAIMS.\n"
+            "  - In each independent claim, introduce countable claim elements with\n"
+            "    'a' or 'an' even if the same term appeared earlier in the description.\n"
+            "  - Use 'the' only for terms already introduced earlier in the same\n"
+            "    claim or in a parent claim referenced by the dependent claim.\n"
+            f"{block}\n"
+        )
     return prompt.system + (
         "\n"
         "ESTABLISHED TERMINOLOGY (Korean → English).\n"
@@ -453,7 +472,10 @@ def _dependent_user_prompt(
             f"OR '{preamble}, wherein <refining clause> ...'"
         )
     else:  # device, system
-        opener = f"'{preamble}, wherein <limitation> ...'"
+        if dependent_adds_subject_matter(chunk_text):
+            opener = f"'{preamble}, further comprising <added element> ...'"
+        else:
+            opener = f"'{preamble}, wherein <limitation> ...'"
 
     layout_repair = (
         _COMBINED_LEGEND_INSTRUCTION
@@ -469,6 +491,10 @@ def _dependent_user_prompt(
         "phrase, the claim number, or the dependency style.\n"
         "  - Do NOT use 'according to claim', 'as claimed in', 'pursuant to', "
         "or 'in accordance with'.\n"
+        "  - If the Korean dependent claim uses addition cues such as '더', "
+        "'추가로', '부가적으로', '또한', or '나아가' with inclusion/provision "
+        "verbs such as '포함', '구비', or '제공', use 'further comprising' "
+        "rather than 'wherein'.\n"
         "\n"
         + _SHARED_CLAIM_RULES
         + _claim_equation_rules(chunk_text, equation_context)
@@ -506,7 +532,7 @@ def build_claim_messages(
     method dependents using 'wherein' when they should use 'further comprising').
     """
     prompt = CLAIM_PROMPT_BY_KIND.get(kind, PROMPT_CLAIMS_DEVICE)
-    system = _system_with_glossary(prompt, glossary)
+    system = _system_with_glossary(prompt, glossary, claim_context=True)
 
     if is_independent or parent_spec is None or not parent_claim_nums:
         user = _independent_user_prompt(

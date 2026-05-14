@@ -17,7 +17,7 @@ from translate.agent.docx_utils import postprocess  # noqa: E402
 
 
 def _assert_postprocess(source: str, expected: str) -> None:
-    actual = postprocess(source)
+    actual = postprocess(source, claim_format=True)
     if actual != expected:
         raise AssertionError(
             f"\nsource  : {source!r}\nexpected: {expected!r}\nactual  : {actual!r}"
@@ -25,29 +25,39 @@ def _assert_postprocess(source: str, expected: str) -> None:
 
 
 def main() -> None:
+    body_actual = postprocess(
+        "The controller uses α; β; and γ to calculate an output value."
+    )
+    body_expected = "The controller uses α; β; and γ to calculate an output value."
+    if body_actual != body_expected:
+        raise AssertionError(
+            f"\nsource  : body semicolon formatting\n"
+            f"expected: {body_expected!r}\nactual  : {body_actual!r}"
+        )
+
     _assert_postprocess(
         "α, β, and γ are X, Y, and Z, respectively.",
-        "α is X;\nβ is Y;\nγ is Z.",
+        "α is X;\n\tβ is Y;\n\tγ is Z.",
     )
     _assert_postprocess(
         "alpha, beta, and gamma mean a width, a height, and a depth, respectively.",
-        "alpha means a width;\nbeta means a height;\ngamma means a depth.",
+        "alpha means a width;\n\tbeta means a height;\n\tgamma means a depth.",
     )
     _assert_postprocess(
         "α, β, and γ respectively denote a first value, a second value, and a third value.",
-        "α denotes a first value;\nβ denotes a second value;\nγ denotes a third value.",
+        "α denotes a first value;\n\tβ denotes a second value;\n\tγ denotes a third value.",
     )
     _assert_postprocess(
         "x, y, and z correspond to a row, a column, and a layer, respectively.",
-        "x corresponds to a row;\ny corresponds to a column;\nz corresponds to a layer.",
+        "x corresponds to a row;\n\ty corresponds to a column;\n\tz corresponds to a layer.",
     )
     _assert_postprocess(
         "where alpha, beta, and gamma is a first value; is a second value; is a third value.",
-        "where alpha is a first value;\nbeta is a second value;\ngamma is a third value.",
+        "where alpha is a first value;\n\tbeta is a second value;\n\tgamma is a third value.",
     )
     _assert_postprocess(
         "wherein α, β, and γ is a first value; wherein is a second value; wherein is a third value.",
-        "wherein α is a first value;\nβ is a second value;\nγ is a third value.",
+        "wherein α is a first value;\n\tβ is a second value;\n\tγ is a third value.",
     )
     print("parameter respectively expansion: ok")
 
