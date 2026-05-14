@@ -114,7 +114,21 @@ def _enforce_further_comprising(text: str) -> str:
     text = _DEP_PREAMBLE_INCLUDE_RE.sub(
         lambda m: m.group(1) + "further comprising", text
     )
+    # USPTO style: a dependent claim that adds multiple elements uses ONE
+    # 'further comprising' preamble followed by ';'-separated items joined by
+    # 'and' before the last. The LLM sometimes repeats the preamble:
+    #   '..., further comprising X; further comprising Y.'
+    # Collapse repeats to ';  and'. For a 2-element addition this gives the
+    # correct USPTO form; for 3+ it still reads as a valid list ('X; and Y; and Z').
+    text = _REPEATED_FURTHER_COMPRISING_RE.sub("; and ", text)
     return text
+
+
+# Repeat-preamble collapser (see _enforce_further_comprising for rationale).
+_REPEATED_FURTHER_COMPRISING_RE = re.compile(
+    r";\s*further\s+comprising\s+",
+    re.IGNORECASE,
+)
 
 
 def _contains_hangul(text: str | None) -> bool:
