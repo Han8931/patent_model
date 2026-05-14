@@ -37,17 +37,42 @@ from ..state import Chunk, TranslationState
 _HANGUL_RE = re.compile(r'[가-힯]')
 
 # USPTO style: dependent claims that add new elements must use the exact phrase
-# 'further comprising'. The LLM regularly slips into 'further include[d|s|ing]'
-# or 'further contain[ed|ing|s]'; rewrite those to the canonical form. Match is
-# word-boundary so we don't touch ordinary 'further' usage in body prose.
+# 'further comprising'. The LLM slips into a wider variety of forms than just
+# 'further including'; rewrite each to the canonical phrase. Operations are
+# claim-only (called from _format_translation, which is only invoked from
+# translate_claims), so legitimate prose uses of these words elsewhere are
+# untouched.
+
+# Group A — any of {further, additionally, also, moreover, in addition} +
+# an include/contain verb. Covers Korean cues like '~을 더 포함하는' /
+# '~을 추가로 포함하는' / '~도 포함하는' translated by the LLM.
 _FURTHER_INCLUDE_RE = re.compile(
-    r"\bfurther\s+(?:includ(?:ed|ing|es)|contain(?:ed|ing|s))\b",
+    r"\b(?:further|additionally|also|moreover|in\s+addition)\s+"
+    r"(?:includ(?:ed|ing|es)?|contain(?:ed|ing|s)?|hav(?:ing|es?)|"
+    r"comprises?)\b",
+    re.IGNORECASE,
+)
+
+# Group B — bare ', including / includes / contains <noun>' directly after a
+# dependent-claim preamble. Pattern: 'of claim N, including X' →
+# 'of claim N, further comprising X'. Anchored on the claim preamble so we
+# don't rewrite ordinary list intros in body text. Handles single, or-paired,
+# and any-one-of-N-to-M parent references.
+_DEP_PREAMBLE_INCLUDE_RE = re.compile(
+    r"(of\s+(?:any\s+one\s+of\s+)?claims?\s+\d+"
+    r"(?:\s+(?:or|to|and|through)\s+(?:claim\s+)?\d+)*"
+    r"\s*,?\s+)"
+    r"(?:includ(?:ed|ing|es)?|contain(?:ed|ing|s)?)\b",
     re.IGNORECASE,
 )
 
 
 def _enforce_further_comprising(text: str) -> str:
-    return _FURTHER_INCLUDE_RE.sub("further comprising", text)
+    text = _FURTHER_INCLUDE_RE.sub("further comprising", text)
+    text = _DEP_PREAMBLE_INCLUDE_RE.sub(
+        lambda m: m.group(1) + "further comprising", text
+    )
+    return text
 
 
 def _contains_hangul(text: str | None) -> bool:

@@ -667,6 +667,15 @@ def _normalize_unicode(text: str) -> str:
     return text.translate(_UNICODE_NORMALIZE_MAP)
 
 
+# Indentation applied to every in-paragraph line break — after a ';'-break in
+# claim element lists / parameter legends AND after a '.' that starts a new
+# sentence inside the same paragraph. One tab character matches typical
+# patent drafting style. The tab is emitted as a real ``<w:tab/>`` element
+# by ``_build_text_run`` / ``write_run_with_breaks`` (Word's proper tab
+# semantic) rather than as a literal whitespace character in ``<w:t>``.
+_SEMICOLON_INDENT = "\t"
+
+
 def _break_sentences(text: str) -> str:
     protected = re.sub(
         r'\b(' + '|'.join(re.escape(a) for a in _ABBREVS) + r')\.',
@@ -674,16 +683,12 @@ def _break_sentences(text: str) -> str:
         text,
         flags=re.IGNORECASE,
     )
-    broken = re.sub(r'\.\s+(?=[A-Z])', '.\n', protected)
+    # Every in-paragraph sentence break gets the same tab indent as a
+    # semicolon break — without it, the second sentence in a multi-sentence
+    # paragraph lands flush-left while the first/legend lines sit at a tab
+    # stop, creating a jagged left edge.
+    broken = re.sub(r'\.\s+(?=[A-Z])', f'.\n{_SEMICOLON_INDENT}', protected)
     return broken.replace('\x00', '.')
-
-
-# Indentation applied to every line that begins after a ';'-break in claim
-# element lists and parameter legends. One tab character matches typical
-# patent drafting style. The tab is emitted as a real ``<w:tab/>`` element
-# by ``_build_text_run`` / ``write_run_with_breaks`` (Word's proper tab
-# semantic) rather than as a literal whitespace character in ``<w:t>``.
-_SEMICOLON_INDENT = "\t"
 
 
 def _break_after_semicolons(text: str) -> str:
@@ -830,10 +835,49 @@ def _repair_malformed_semicolon_legend(text: str) -> str:
     return _MALFORMED_SEMICOLON_LEGEND_RE.sub(repl, text)
 
 
+# Plural-or-mass noun detection for the article-stripping sweep below.
+#
+# We drop 'a/an' on plural / mass nouns because English (and USPTO drafting
+# style) requires bare plural / mass on first mention, never an article.
+# A noun is treated as plural-or-mass when it:
+#   * ends in -s but NOT in the safe singular endings -ss, -us, -is, -os,
+#     -ous (e.g. 'glass', 'apparatus', 'thesis', 'os', 'famous'); OR
+#   * is one of a small allow-list of common patent mass nouns
+#     ('noise', 'data', 'metadata', 'electricity', 'voltage', etc.).
+#
+# Conservative on purpose — we only act on shapes that are almost certainly
+# wrong. Single-pass per (article, noun) pair so we don't double-strip.
+_MASS_NOUNS = (
+    "noise", "data", "metadata", "voltage", "current", "power", "torque",
+    "information", "feedback", "interference", "equipment", "software",
+    "hardware", "luminance", "radiation", "humidity", "moisture",
+)
+
+_ARTICLE_BEFORE_PLURAL_RE = re.compile(
+    r"\b(?P<art>a|an|A|An)\s+"
+    r"(?P<noun>"
+    # plural endings: 's' that isn't a singular ending
+    r"[A-Za-z]+(?<![us])(?<![is])(?<![os])(?<![ss])s"
+    # or one of the mass nouns
+    r"|(?:" + "|".join(_MASS_NOUNS) + r")"
+    r")\b",
+)
+
+
+def _strip_articles_on_plurals(text: str) -> str:
+    """Drop 'a/an' before plural or mass nouns (case-preserving for the noun)."""
+    def repl(m: re.Match) -> str:
+        # Drop the article entirely. Leave the following whitespace from the
+        # surrounding match intact via re.sub's normal behavior.
+        return m.group("noun")
+    return _ARTICLE_BEFORE_PLURAL_RE.sub(repl, text)
+
+
 def postprocess(text: str) -> str:
     text = _normalize_unicode(text)
     text = _expand_respectively(text)
     text = _repair_malformed_semicolon_legend(text)
+    text = _strip_articles_on_plurals(text)
     text = _break_sentences(text)
     text = _break_after_semicolons(text)
     return text
