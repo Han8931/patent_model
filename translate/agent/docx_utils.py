@@ -695,6 +695,17 @@ def _break_after_semicolons(text: str) -> str:
     return re.sub(r';\s+', f";\n{_SEMICOLON_INDENT}", text)
 
 
+def _indent_after_colon(text: str) -> str:
+    """Add the same tab indent to an in-paragraph line break after ':'.
+
+    Claim preambles ('... comprising:') often arrive from the LLM with a
+    newline after the colon but no indent, so the first element lands
+    flush-left while subsequent ';'-separated elements sit at a tab stop.
+    Normalize any existing ':\\n' to ':\\n\\t' to keep the left edge aligned.
+    """
+    return re.sub(rf':[ \t]*\n(?!{_SEMICOLON_INDENT})', f':\n{_SEMICOLON_INDENT}', text)
+
+
 # ---------------------------------------------------------------------------
 # 'respectively' expansion
 # ---------------------------------------------------------------------------
@@ -968,4 +979,5 @@ def postprocess(text: str) -> str:
     text = _strip_reference_parens(text)
     text = _break_sentences(text)
     text = _break_after_semicolons(text)
+    text = _indent_after_colon(text)
     return text

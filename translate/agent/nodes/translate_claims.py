@@ -66,8 +66,50 @@ _DEP_PREAMBLE_INCLUDE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_DEP_PREAMBLE_RE_FRAGMENT = (
+    r"(of\s+(?:any\s+one\s+of\s+)?claims?\s+\d+"
+    r"(?:\s+(?:or|to|and|through)\s+(?:claim\s+)?\d+)*"
+    r"\s*)"
+)
+
+# Group C — passive 'wherein <subject> is/are (further|also|additionally)
+# (included|comprised|contained|provided|...)'. The LLM produces this when
+# the Korean source uses '~이 더 포함된다' / '~이 추가로 구비된다'. Anchored on
+# the claim preamble so body prose like 'wherein X is also provided to ...'
+# is untouched. Subject is captured and moved to the position required by
+# USPTO drafting style: 'of claim N, further comprising <subject>'.
+_DEP_WHEREIN_PASSIVE_INCLUDE_RE = re.compile(
+    _DEP_PREAMBLE_RE_FRAGMENT
+    + r",?\s+wherein\s+(?P<subject>.+?)\s+"
+    r"(?:is|are)\s+(?:further|also|additionally|moreover)\s+"
+    r"(?:includ(?:ed|es)?|comprised|contain(?:ed|s)?|"
+    r"provided|incorporated|added|disposed)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Group D — active 'wherein <parent> (further|also|additionally)
+# includes/contains/comprises'. Same anchor; the parent reference is dropped
+# because USPTO style names only the added element after 'further comprising'.
+_DEP_WHEREIN_ACTIVE_INCLUDE_RE = re.compile(
+    _DEP_PREAMBLE_RE_FRAGMENT
+    + r",?\s+wherein\s+(?:.+?)\s+"
+    r"(?:further|also|additionally|moreover)\s+"
+    r"(?:includes?|comprises?|contains?)\s+",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 def _enforce_further_comprising(text: str) -> str:
+    # Run wherein-passive and wherein-active rewrites BEFORE the bare
+    # _FURTHER_INCLUDE_RE pass — otherwise 'is further included' becomes
+    # 'is further comprising', which is ungrammatical.
+    text = _DEP_WHEREIN_PASSIVE_INCLUDE_RE.sub(
+        lambda m: f"{m.group(1).rstrip()}, further comprising {m.group('subject').strip()}",
+        text,
+    )
+    text = _DEP_WHEREIN_ACTIVE_INCLUDE_RE.sub(
+        lambda m: f"{m.group(1).rstrip()}, further comprising ", text
+    )
     text = _FURTHER_INCLUDE_RE.sub("further comprising", text)
     text = _DEP_PREAMBLE_INCLUDE_RE.sub(
         lambda m: m.group(1) + "further comprising", text
