@@ -579,6 +579,69 @@ def build_claim_retry_messages(
 
 
 # ---------------------------------------------------------------------------
+# Bulk claim translation — single LLM call for ALL claims at once
+# ---------------------------------------------------------------------------
+# This intentionally uses a minimal prompt to test how well the model handles
+# claim drafting unaided. Image-based equations are represented as
+# [EQUATION_N] markers in the input; the prompt requires those markers to
+# appear unchanged at the matching positions in the output so the writer can
+# splice the original equation XML back in.
+
+_BULK_CLAIMS_DELIMITER = "===== CLAIM {n} ====="
+_BULK_CLAIMS_DELIM_RE_FMT = r"=====\s*CLAIM\s+(\d+)\s*====="
+
+BULK_CLAIMS_SYSTEM = (
+    "Translate these claims into USPTO style. "
+    "Preserve every [EQUATION_N] marker verbatim and in the same relative "
+    "position. Return each claim's English under the same '===== CLAIM N ====='"
+    " banner that precedes it in the input."
+)
+
+
+def build_claims_bulk_messages(
+    claims: list[tuple[int, str]],
+) -> list[dict]:
+    """Bundle every claim into a single user message keyed by claim number.
+
+    ``claims`` is a list of (claim_num, korean_text) pairs in source order.
+    The model returns the same banner format; ``parse_claims_bulk_response``
+    splits it back into per-claim translations.
+    """
+    parts: list[str] = []
+    for num, text in claims:
+        parts.append(_BULK_CLAIMS_DELIMITER.format(n=num))
+        parts.append(text)
+    user = "\n".join(parts)
+    return [
+        {"role": "system", "content": BULK_CLAIMS_SYSTEM},
+        {"role": "user", "content": user},
+    ]
+
+
+def parse_claims_bulk_response(raw: str) -> dict[int, str]:
+    """Split the model's bulk response back into ``{claim_num: english}``.
+
+    Tolerant of leading/trailing whitespace, fenced code blocks, and JSON
+    wrappers — but expects each claim's English to follow its banner line.
+    """
+    import re as _re
+    text = raw.strip()
+    # Strip ``` fences if the model wrapped its output.
+    if text.startswith("```"):
+        text = _re.sub(r"^```[a-zA-Z]*\n", "", text)
+        text = _re.sub(r"\n```\s*$", "", text)
+    banner_re = _re.compile(_BULK_CLAIMS_DELIM_RE_FMT)
+    out: dict[int, str] = {}
+    matches = list(banner_re.finditer(text))
+    for i, m in enumerate(matches):
+        num = int(m.group(1))
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        out[num] = text[start:end].strip()
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Review — decide + revise per section
 # ---------------------------------------------------------------------------
 

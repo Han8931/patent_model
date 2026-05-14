@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import re
 
-from ..claim_classifier import classify_claim
 from ..docx_utils import extract_all_text, extract_math_texts, has_drawing, has_math
 from ..state import Chunk, TranslationState
 
@@ -141,44 +140,4 @@ def chunk_claims(state: TranslationState) -> dict:
             current_text_parts.append(text)
 
     flush()
-    _classify_chunks(chunks)
     return {"chunks_claims": chunks}
-
-
-def _classify_chunks(chunks: list[Chunk]) -> None:
-    """Two-pass classification:
-
-    1. First pass — classify every claim from its own Korean text. Independents
-       latch a kind from their trailing "...을 포함하는 X" subject; dependents
-       capture parent_claim_nums and a best-effort kind.
-    2. Second pass — for each dependent, inherit the parent's kind unless the
-       dependent's own text strongly disagrees. This handles the common case
-       where the dependent body never restates the subject (e.g.
-       '청구항 1에 있어서, 상기 ~는 ~인 ...').
-    """
-    # Pass 1: classify in isolation.
-    for c in chunks:
-        if c.claim_num is None:
-            continue
-        spec = classify_claim(c.claim_num, c.text)
-        c.claim_kind = spec.claim_kind
-        c.is_independent = spec.is_independent
-        c.parent_claim_nums = list(spec.parent_claim_nums)
-        c.multi_parent_kind = spec.multi_parent_kind
-
-    # Pass 2: dependents inherit parent kind.
-    by_num = {c.claim_num: c for c in chunks if c.claim_num is not None}
-    for c in chunks:
-        if (
-            c.claim_num is None
-            or c.is_independent
-            or not c.parent_claim_nums
-        ):
-            continue
-        parent = by_num.get(c.parent_claim_nums[0])
-        if parent is None or parent.claim_kind is None:
-            continue
-        # Re-run with parent's kind as the default; classifier keeps the
-        # dependent's own kind only if it explicitly disagrees.
-        spec = classify_claim(c.claim_num, c.text, parent_kind=parent.claim_kind)
-        c.claim_kind = spec.claim_kind

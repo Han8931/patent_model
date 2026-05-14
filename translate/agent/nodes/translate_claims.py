@@ -1,325 +1,42 @@
-"""translate_claims — two-stage translation driven by deterministic claim classification.
+"""translate_claims — single bundled LLM call for ALL claims.
 
-Phase 1 — INDEPENDENTS, in claim-number order
-    Translate every independent claim using the per-kind prompt
-    (device/method/crm/system). Extract the locked-in noun phrase (and actor
-    phrase for CRM/system) from the LLM's English output and store it in a
-    PreambleSpec keyed by claim number.
+Sends every claim's Korean text to the model in one user message, banner-
+delimited by claim number. The model returns one English block per banner;
+we split the response and assign each piece to its chunk.
 
-Phase 2 — DEPENDENTS, in source order
-    For each dependent claim, look up the parent's PreambleSpec and inject
-    the literal preamble prefix ('The <noun_phrase> of claim N, wherein …')
-    into the user prompt. Method dependents pick 'wherein' vs
-    'further comprising' from the Korean source before the LLM call.
+Image-based equations are represented as [EQUATION_N] markers in the input
+(produced by chunk_claims). The bulk prompt requires those markers to come
+back verbatim so the writer can splice the original Word equation XML back
+into the translated claim paragraphs.
 
-Equation paragraphs are still preserved in their original positions by the
-write node — translation here is purely textual.
+Postprocess is intentionally minimal — only Unicode normalization runs.
+Earlier deterministic sweeps (further-comprising rewrite, article fixes,
+reference-paren stripping, etc.) have been turned off so this path can be
+tested against the model's raw drafting behavior.
 """
 
 from __future__ import annotations
 
 import re
-import time
 
-from ..claim_classifier import (
-    PreambleSpec,
-    build_dependent_preamble,
-    dependent_adds_subject_matter,
-    extract_preamble,
-    method_dependent_connective,
-)
-from ..docx_utils import postprocess
-from ..glossary import clean_translation_text, extract_json_block, merge_terms
-from ..prompts import build_claim_messages, build_claim_retry_messages
-from ..sections import LLM_CLAIM_PREFIX_RE
+from ..docx_utils import _normalize_unicode
+from ..prompts import build_claims_bulk_messages, parse_claims_bulk_response
 from ..state import Chunk, TranslationState
 
 
 _HANGUL_RE = re.compile(r'[가-힯]')
-
-# USPTO style: dependent claims that add new elements must use the exact phrase
-# 'further comprising'. The LLM slips into a wider variety of forms than just
-# 'further including'; rewrite each to the canonical phrase. Operations are
-# claim-only (called from _format_translation, which is only invoked from
-# translate_claims), so legitimate prose uses of these words elsewhere are
-# untouched.
-
-# Group A — any of {further, additionally, also, moreover, in addition} +
-# an include/contain verb. Covers Korean cues like '~을 더 포함하는' /
-# '~을 추가로 포함하는' / '~도 포함하는' translated by the LLM.
-_FURTHER_INCLUDE_RE = re.compile(
-    r"\b(?:further|additionally|also|moreover|in\s+addition)\s+"
-    r"(?:includ(?:ed|ing|es)?|contain(?:ed|ing|s)?|hav(?:ing|es?)|"
-    r"comprises?)\b",
-    re.IGNORECASE,
-)
-
-# Group B — bare ', including / includes / contains <noun>' directly after a
-# dependent-claim preamble. Pattern: 'of claim N, including X' →
-# 'of claim N, further comprising X'. Anchored on the claim preamble so we
-# don't rewrite ordinary list intros in body text. Handles single, or-paired,
-# and any-one-of-N-to-M parent references.
-_DEP_PREAMBLE_INCLUDE_RE = re.compile(
-    r"(of\s+(?:any\s+one\s+of\s+)?claims?\s+\d+"
-    r"(?:\s+(?:or|to|and|through)\s+(?:claim\s+)?\d+)*"
-    r"\s*,?\s+)"
-    r"(?:includ(?:ed|ing|es)?|contain(?:ed|ing|s)?)\b",
-    re.IGNORECASE,
-)
-
-_DEP_PREAMBLE_RE_FRAGMENT = (
-    r"(of\s+(?:any\s+one\s+of\s+)?claims?\s+\d+"
-    r"(?:\s+(?:or|to|and|through)\s+(?:claim\s+)?\d+)*"
-    r"\s*)"
-)
-
-# Group C — passive 'wherein <subject> is/are (further|also|additionally)
-# (included|comprised|contained|provided|...)'. The LLM produces this when
-# the Korean source uses '~이 더 포함된다' / '~이 추가로 구비된다'. Anchored on
-# the claim preamble so body prose like 'wherein X is also provided to ...'
-# is untouched. Subject is captured and moved to the position required by
-# USPTO drafting style: 'of claim N, further comprising <subject>'.
-_DEP_WHEREIN_PASSIVE_INCLUDE_RE = re.compile(
-    _DEP_PREAMBLE_RE_FRAGMENT
-    + r",?\s+wherein\s+(?P<subject>.+?)\s+"
-    r"(?:is|are)\s+(?:further|also|additionally|moreover)\s+"
-    r"(?:includ(?:ed|es)?|comprised|contain(?:ed|s)?|"
-    r"provided|incorporated|added|disposed)\b",
-    re.IGNORECASE | re.DOTALL,
-)
-
-# Group D — active 'wherein <parent> (further|also|additionally)
-# includes/contains/comprises'. Same anchor; the parent reference is dropped
-# because USPTO style names only the added element after 'further comprising'.
-_DEP_WHEREIN_ACTIVE_INCLUDE_RE = re.compile(
-    _DEP_PREAMBLE_RE_FRAGMENT
-    + r",?\s+wherein\s+(?:.+?)\s+"
-    r"(?:further|also|additionally|moreover)\s+"
-    r"(?:includes?|comprises?|contains?)\s+",
-    re.IGNORECASE | re.DOTALL,
-)
-
-
-def _enforce_further_comprising(text: str) -> str:
-    # Run wherein-passive and wherein-active rewrites BEFORE the bare
-    # _FURTHER_INCLUDE_RE pass — otherwise 'is further included' becomes
-    # 'is further comprising', which is ungrammatical.
-    text = _DEP_WHEREIN_PASSIVE_INCLUDE_RE.sub(
-        lambda m: f"{m.group(1).rstrip()}, further comprising {m.group('subject').strip()}",
-        text,
-    )
-    text = _DEP_WHEREIN_ACTIVE_INCLUDE_RE.sub(
-        lambda m: f"{m.group(1).rstrip()}, further comprising ", text
-    )
-    text = _FURTHER_INCLUDE_RE.sub("further comprising", text)
-    text = _DEP_PREAMBLE_INCLUDE_RE.sub(
-        lambda m: m.group(1) + "further comprising", text
-    )
-    # USPTO style: a dependent claim that adds multiple elements uses ONE
-    # 'further comprising' preamble followed by ';'-separated items joined by
-    # 'and' before the last. The LLM sometimes repeats the preamble:
-    #   '..., further comprising X; further comprising Y.'
-    # Collapse repeats to ';  and'. For a 2-element addition this gives the
-    # correct USPTO form; for 3+ it still reads as a valid list ('X; and Y; and Z').
-    text = _REPEATED_FURTHER_COMPRISING_RE.sub("; and ", text)
-    return text
-
-
-# Repeat-preamble collapser (see _enforce_further_comprising for rationale).
-_REPEATED_FURTHER_COMPRISING_RE = re.compile(
-    r";\s*further\s+comprising\s+",
-    re.IGNORECASE,
-)
 
 
 def _contains_hangul(text: str | None) -> bool:
     return bool(text and _HANGUL_RE.search(text))
 
 
-def _format_translation(claim_num: int, raw_text: str) -> str:
-    """Strip LLM-added claim numbers, lowercase after ';'/':', enforce
-    'further comprising' for added-element dependent claims, prepend 'N. '."""
-    text = LLM_CLAIM_PREFIX_RE.sub('', raw_text.strip())
-    text = re.sub(r'(?<=[;:])\n([A-Z])', _lower_claim_element_initial, text)
-    text = _enforce_further_comprising(text)
-    return f"{claim_num}. {text}"
-
-
-def _lower_claim_element_initial(m: re.Match) -> str:
-    """Lowercase claim element starts, but preserve parameter symbols.
-
-    After postprocess(), parameter legends often look like
-    'A is ...;\nB is ...'. The old formatter lowercased B/C/etc. because it
-    blindly lowercased every capital after ';\\n'. Keep single-letter and
-    all-caps symbols when they are followed by a definition verb.
-    """
-    text = m.string
-    pos = m.end(1)
-    tail = text[pos:]
-    if pos < len(text) and re.match(r'[A-Z0-9_₀-₉]', text[pos]):
-        return "\n" + m.group(1)
-    if re.match(
-        r'\s+(?:is|are|denotes?|represents?|stands?\s+for|indicates?|means?)\b',
-        tail,
-        flags=re.IGNORECASE,
-    ):
-        return "\n" + m.group(1)
-    return "\n" + m.group(1).lower()
-
-
-def _enforce_independent_preamble(text: str, planned: str | None) -> str:
-    """Conservatively replace the opening preamble with the planned one.
-
-    The planner is responsible for semantic preamble selection. This function
-    only enforces the already-planned opening when the translation has a normal
-    claim preamble ending in ':' near the start.
-    """
-    if not planned:
-        return text
-    text = text.strip()
-    planned = planned.strip()
-    if not text or text.startswith(planned):
-        return text
-    match = re.match(r'^[A-Z][^:\n]{0,220}:', text)
-    if not match:
-        return text
-    return planned + text[match.end():]
-
-
-def _dependent_opening(
-    chunk: Chunk,
-    parent_spec: PreambleSpec | None,
-    method_connective: str,
-) -> str | None:
-    if parent_spec is None or not chunk.parent_claim_nums:
-        return None
-    preamble = build_dependent_preamble(
-        parent_spec,
-        chunk.parent_claim_nums,
-        chunk.multi_parent_kind,
-    )
-    if (
-        chunk.claim_kind == "method"
-        and method_connective == "further comprising"
-    ) or (
-        chunk.claim_kind in {"device", "system"}
-        and dependent_adds_subject_matter(chunk.text)
-    ):
-        return f"{preamble}, further comprising"
-    return f"{preamble}, wherein"
-
-
-def _enforce_dependent_preamble(text: str, required: str | None) -> str:
-    """Ensure a dependent claim keeps its claim-reference opening.
-
-    LLMs occasionally rewrite dependents as independent claims
-    ("A semiconductor package comprising:"). When we have a parent-derived
-    opening, replace any independent-style opening through the first ':' or
-    comma with the required dependent opening.
-    """
-    if not required:
-        return text
-    text = text.strip()
-    required = required.strip()
-    if not text:
-        return text
-    if text.lower().startswith(required.lower()):
-        return required + text[len(required):]
-
-    independent = re.match(r'^A[n]?\s+[^:\n]{1,220}:\s*', text)
-    if independent:
-        if required.lower().endswith(", wherein"):
-            noun_match = re.match(r'^The\s+(.+?)\s+of\s+', required)
-            if noun_match:
-                noun = noun_match.group(1)
-                return (
-                    required
-                    + f" the {noun} comprises "
-                    + text[independent.end():].lstrip()
-                )
-        return required + " " + text[independent.end():].lstrip()
-
-    dependent = re.match(r'^The\s+[^,\n]{1,220},\s*(?:wherein|further\s+comprising)\b\s*', text, re.IGNORECASE)
-    if dependent:
-        return required + " " + text[dependent.end():].lstrip()
-
-    return required + " " + text
-
-
-def _translate_one(
-    chunk: Chunk,
-    *,
-    client,
-    glossary: dict[str, str],
-    parent_spec: PreambleSpec | None,
-    verbose: bool,
-) -> dict | None:
-    """Run one LLM call for ``chunk``. Mutates chunk.translation; returns key_terms."""
-    method_connective = "wherein"
-    if chunk.claim_kind == "method" and not chunk.is_independent:
-        method_connective = method_dependent_connective(chunk.text)
-    required_dependent_opening = _dependent_opening(
-        chunk, parent_spec, method_connective
-    )
-
-    messages = build_claim_messages(
-        claim_num=chunk.claim_num,
-        chunk_text=chunk.text,
-        glossary=glossary,
-        kind=chunk.claim_kind or "device",
-        is_independent=bool(chunk.is_independent),
-        parent_spec=parent_spec,
-        parent_claim_nums=chunk.parent_claim_nums,
-        multi_parent_kind=chunk.multi_parent_kind,
-        method_connective=method_connective,
-        equation_context=chunk.equation_context,
-        independent_preamble=chunk.independent_preamble,
-    )
-
-    last_problem = ""
-    for attempt in range(2):
-        try:
-            raw = client.complete(messages)
-            data = extract_json_block(raw) or {}
-            text = clean_translation_text(data.get("text")) or clean_translation_text(raw)
-            if not text:
-                last_problem = "The response did not contain usable English text."
-            elif _contains_hangul(text):
-                last_problem = "The response still contains Korean/Hangul text."
-            else:
-                if chunk.is_independent:
-                    text = _enforce_independent_preamble(
-                        text, chunk.independent_preamble
-                    )
-                else:
-                    text = _enforce_dependent_preamble(
-                        text, required_dependent_opening
-                    )
-                formatted = _format_translation(
-                    chunk.claim_num,
-                    postprocess(text, claim_format=True),
-                )
-                if _contains_hangul(formatted):
-                    last_problem = "The formatted claim still contains Korean/Hangul text."
-                else:
-                    chunk.translation = formatted
-                    return data
-        except Exception as exc:
-            last_problem = f"The model call failed: {type(exc).__name__}: {exc}"
-
-        if verbose:
-            prefix = f"  translate_claims claim {chunk.claim_num}: "
-            suffix = " Retrying..." if attempt == 0 else ""
-            print(f"{prefix}{last_problem}{suffix}")
-        if attempt == 0:
-            messages = build_claim_retry_messages(
-                previous_messages=messages,
-                problem=last_problem,
-                chunk_text=chunk.text,
-            )
-
-    chunk.translation = ""
-    return None
+def _minimal_cleanup(claim_num: int, raw_text: str) -> str:
+    """Unicode-normalize and prepend 'N. ' if the model didn't include it."""
+    text = _normalize_unicode(raw_text.strip())
+    if not re.match(rf'^\s*{claim_num}\s*\.\s', text):
+        text = f"{claim_num}. {text}"
+    return text
 
 
 def _assert_claims_translated(chunks: list[Chunk]) -> None:
@@ -343,95 +60,40 @@ def translate_claims(state: TranslationState) -> dict:
         return {}
 
     client = state["client"]
-    glossary = dict(state.get("glossary", {}))
-    delay = state.get("delay", 0.0)
     progress = state.get("progress") or (lambda _: None)
     verbose = state.get("verbose", False)
 
     valid = [c for c in chunks if c.claim_num is not None]
     total = len(valid)
-    progress(f"Translating CLAIMS ({total} claims)…")
+    if total == 0:
+        return {"chunks_claims": chunks}
 
-    preamble_specs: dict[int, PreambleSpec] = {}
-    done = 0
+    progress(f"Translating CLAIMS ({total} claims, one bundled call)…")
 
-    # ----- Phase 1: independents in claim-number order -----------------------
-    independents = sorted(
-        (c for c in valid if c.is_independent),
-        key=lambda c: c.claim_num,
-    )
-    for chunk in independents:
-        data = _translate_one(
-            chunk, client=client, glossary=glossary,
-            parent_spec=None, verbose=verbose,
-        )
-        if data is not None:
-            merge_terms(glossary, data.get("key_terms") or [])
+    pairs = [(c.claim_num, c.text) for c in valid]
+    messages = build_claims_bulk_messages(pairs)
 
-        if chunk.translation:
-            # Strip the leading "N." (plus whatever whitespace postprocess
-            # inserted: a space, a newline, etc.) so noun-phrase regexes match
-            # on the bare English claim sentence.
-            body = re.sub(
-                rf'^{chunk.claim_num}\.\s*', '', chunk.translation, count=1
-            )
-            extracted_noun, extracted_actor = extract_preamble(
-                body, chunk.claim_kind or "device", korean_source=chunk.text
-            )
-            noun = chunk.noun_phrase or extracted_noun
-            actor = chunk.actor_phrase or extracted_actor
-            chunk.noun_phrase = noun
-            chunk.actor_phrase = actor
-            preamble_specs[chunk.claim_num] = PreambleSpec(
-                claim_num=chunk.claim_num,
-                claim_kind=chunk.claim_kind or "device",
-                noun_phrase=noun,
-                actor_phrase=actor,
-            )
+    try:
+        raw = client.complete(messages)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Bulk claim translation call failed: {type(exc).__name__}: {exc}"
+        ) from exc
 
-        done += 1
-        if done % 10 == 0 or done == total:
-            progress(f"  CLAIM {done}/{total}")
-        if delay > 0:
-            time.sleep(delay)
-
-    # ----- Phase 2: dependents in source order -------------------------------
-    dependents = [c for c in valid if not c.is_independent]
-    for chunk in dependents:
-        parent_spec: PreambleSpec | None = None
-        for p_num in chunk.parent_claim_nums:
-            if p_num in preamble_specs:
-                parent_spec = preamble_specs[p_num]
-                break
-
-        if parent_spec is None and verbose:
+    by_num = parse_claims_bulk_response(raw)
+    if verbose:
+        missing = [c.claim_num for c in valid if c.claim_num not in by_num]
+        if missing:
             print(
-                f"  translate_claims claim {chunk.claim_num}: "
-                f"no preamble for parents={chunk.parent_claim_nums}; falling back"
+                f"  translate_claims: bulk response missing claim(s): {missing}"
             )
 
-        data = _translate_one(
-            chunk, client=client, glossary=glossary,
-            parent_spec=parent_spec, verbose=verbose,
-        )
-        if data is not None:
-            merge_terms(glossary, data.get("key_terms") or [])
-
-        if parent_spec is not None:
-            chunk.noun_phrase = parent_spec.noun_phrase
-            chunk.actor_phrase = parent_spec.actor_phrase
-            preamble_specs[chunk.claim_num] = PreambleSpec(
-                claim_num=chunk.claim_num,
-                claim_kind=chunk.claim_kind or parent_spec.claim_kind,
-                noun_phrase=parent_spec.noun_phrase,
-                actor_phrase=parent_spec.actor_phrase,
-            )
-
-        done += 1
-        if done % 10 == 0 or done == total:
-            progress(f"  CLAIM {done}/{total}")
-        if delay > 0:
-            time.sleep(delay)
+    for chunk in valid:
+        text = by_num.get(chunk.claim_num, "")
+        if not text or _contains_hangul(text):
+            chunk.translation = ""
+            continue
+        chunk.translation = _minimal_cleanup(chunk.claim_num, text)
 
     _assert_claims_translated(valid)
-    return {"chunks_claims": chunks, "glossary": glossary}
+    return {"chunks_claims": chunks}

@@ -9,7 +9,6 @@ from .nodes.chunk_body import chunk_body
 from .nodes.chunk_claims import chunk_claims
 from .nodes.classify import classify
 from .nodes.load import load
-from .nodes.plan_claim_preambles import plan_claim_preambles
 from .nodes.review import make_decide, make_revise, needs_revision
 from .nodes.static import apply_static
 from .nodes.translate_abstract import translate_abstract
@@ -26,7 +25,7 @@ def build_graph():
         load → classify → apply_static
              → chunk_body → translate_body → review_body
              → chunk_abstract → translate_abstract → review_abstract
-             → chunk_claims → plan_claim_preambles → translate_claims → review_claims
+             → chunk_claims → translate_claims → review_claims
              → write
     """
     g = StateGraph(TranslationState)
@@ -46,7 +45,6 @@ def build_graph():
     g.add_node("review_revise_abstract", make_revise("abstract"))
 
     g.add_node("chunk_claims", chunk_claims)
-    g.add_node("plan_claim_preambles", plan_claim_preambles)
     g.add_node("translate_claims", translate_claims)
     g.add_node("review_decide_claims", make_decide("claims"))
     g.add_node("review_revise_claims", make_revise("claims"))
@@ -77,8 +75,7 @@ def build_graph():
     )
     g.add_edge("review_revise_abstract", "chunk_claims")
 
-    g.add_edge("chunk_claims", "plan_claim_preambles")
-    g.add_edge("plan_claim_preambles", "translate_claims")
+    g.add_edge("chunk_claims", "translate_claims")
     g.add_edge("translate_claims", "review_decide_claims")
     g.add_conditional_edges(
         "review_decide_claims",

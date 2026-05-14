@@ -11,14 +11,12 @@ from __future__ import annotations
 
 from typing import Callable, Literal
 
-from ..claim_classifier import PreambleSpec, method_dependent_connective
-from ..docx_utils import postprocess
+from ..docx_utils import _normalize_unicode, postprocess
 from ..glossary import extract_json_block
 from ..nodes.translate_claims import (
     _assert_claims_translated,
     _contains_hangul,
-    _dependent_opening,
-    _enforce_dependent_preamble,
+    _minimal_cleanup,
 )
 from ..prompts import build_decision_messages, build_revision_messages
 from ..state import Chunk, TranslationState
@@ -51,39 +49,6 @@ def _pairs_from(chunks: list[Chunk]) -> list[tuple[str, str]]:
     ]
 
 
-def _claim_preamble_specs(chunks: list[Chunk]) -> dict[int, PreambleSpec]:
-    specs: dict[int, PreambleSpec] = {}
-    for c in chunks:
-        if c.claim_num is None or not c.noun_phrase:
-            continue
-        specs[c.claim_num] = PreambleSpec(
-            claim_num=c.claim_num,
-            claim_kind=c.claim_kind or "device",
-            noun_phrase=c.noun_phrase,
-            actor_phrase=c.actor_phrase,
-        )
-    return specs
-
-
-def _enforce_revised_claim_preamble(
-    chunk: Chunk,
-    text: str,
-    specs: dict[int, PreambleSpec],
-) -> str:
-    if chunk.is_independent or not chunk.parent_claim_nums:
-        return text
-    parent_spec = None
-    for parent_num in chunk.parent_claim_nums:
-        if parent_num in specs:
-            parent_spec = specs[parent_num]
-            break
-    if parent_spec is None:
-        return text
-    method_connective = "wherein"
-    if chunk.claim_kind == "method":
-        method_connective = method_dependent_connective(chunk.text)
-    required = _dependent_opening(chunk, parent_spec, method_connective)
-    return _enforce_dependent_preamble(text, required)
 
 
 def make_decide(kind: SectionKind) -> Callable[[TranslationState], dict]:
@@ -157,7 +122,6 @@ def make_revise(kind: SectionKind) -> Callable[[TranslationState], dict]:
 
         # The pairs index corresponds to chunks-with-a-translation; map back to chunks.
         translated_chunks = [c for c in chunks if c.translation]
-        claim_specs = _claim_preamble_specs(chunks) if kind == "claims" else {}
         applied = 0
         for item in revisions:
             if not isinstance(item, dict):
@@ -166,12 +130,7 @@ def make_revise(kind: SectionKind) -> Callable[[TranslationState], dict]:
             text = item.get("text")
             if isinstance(idx, int) and isinstance(text, str) and 0 <= idx < len(translated_chunks):
                 if kind == "claims":
-                    text = _enforce_revised_claim_preamble(
-                        translated_chunks[idx],
-                        text,
-                        claim_specs,
-                    )
-                    text = postprocess(text, claim_format=True)
+                    # Minimal cleanup matches the bulk translate_claims path.
                     if _contains_hangul(text):
                         if verbose:
                             claim_num = translated_chunks[idx].claim_num
@@ -180,6 +139,8 @@ def make_revise(kind: SectionKind) -> Callable[[TranslationState], dict]:
                                 "revision containing Korean/Hangul text."
                             )
                         continue
+                    claim_num = translated_chunks[idx].claim_num
+                    text = _minimal_cleanup(claim_num, text) if claim_num is not None else _normalize_unicode(text.strip())
                 else:
                     text = postprocess(text)
                 translated_chunks[idx].translation = text
