@@ -98,7 +98,7 @@ def extract_all_text(para, *, math_as_placeholder: bool = False) -> str:
     """
     parts: list[str] = []
     _append_translatable_text(para._p, parts, math_as_placeholder=math_as_placeholder)
-    return ''.join(parts)
+    return _strip_reference_parens(''.join(parts))
 
 
 def _local_name(el) -> str:
@@ -873,11 +873,99 @@ def _strip_articles_on_plurals(text: str) -> str:
     return _ARTICLE_BEFORE_PLURAL_RE.sub(repl, text)
 
 
+# ---------------------------------------------------------------------------
+# Reference-paren stripping
+# ---------------------------------------------------------------------------
+# Korean patents commonly write figure references as 'noun(NNN)' / 'noun(A)' /
+# 'noun(T1)' / 'noun(GR(1))'. USPTO style drops the parens and keeps the
+# reference adjacent to its noun. We do this on the Korean source side
+# (inside ``extract_all_text``) so the LLM never sees the parens, and again
+# as a defensive postprocess pass on the English output to catch anything
+# the model reintroduces.
+#
+# A parenthetical is treated as a reference iff its inner content matches
+# one of these unambiguous shapes:
+#   * has any digit          → '100', '100a', 'T1', '3k', 'GR(1)'
+#   * single uppercase letter → 'A', 'B', 'T'
+#   * Roman numeral I…XII     → 'I', 'II', 'IV', 'XII'
+# Multi-letter no-digit content stays inside parens — those are acronyms
+# (e.g. '(AI)', '(CPO)', '(MSB)', '(SNR)'). So does anything with spaces,
+# colons, periods, Hangul, or that isn't immediately preceded by a word
+# character (e.g. '(see FIG. 1)' standing alone in a sentence).
+
+_ROMAN_NUMERALS_REF = frozenset({
+    "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"
+})
+
+
+def _is_reference_inner(s: str) -> bool:
+    """True iff the parenthesized inner content has reference shape."""
+    if not s or "\n" in s or len(s) > 20:
+        return False
+    if _HANGUL_RE.search(s):
+        return False
+    # References are compact tokens — whitespace, commas, and sentence
+    # punctuation signal descriptive content like '(about 100)' or '(e.g., 10)'.
+    if any(c in " \t.:?!,;" for c in s):
+        return False
+    # Has at least one digit — covers '100', '100a', 'T1', 'GR(1)', '3k+1'
+    if any(c.isdigit() for c in s):
+        return True
+    # Single uppercase letter
+    if len(s) == 1 and s.isalpha() and s.isupper():
+        return True
+    # Roman numeral up to XII
+    if s in _ROMAN_NUMERALS_REF:
+        return True
+    return False
+
+
+# Three regexes, each catches one shape:
+#
+# 1. Nested ref:  'word(GR(1))' or 'word (GR(1))' — optional space, inner
+#    contains '<letters>(<digits>)'. Stripped first so its inner '(N)'
+#    isn't later eroded by the simple regexes.
+# 2. Korean-side: '기판(100)' / '층(A)' — Hangul lead, no space, plain inner.
+# 3. English-side: 'substrate (100)' — letter/digit lead, SPACE required.
+#
+# Splitting Korean and English by the space requirement keeps cases like
+# 'GR(1)' (letter, no space) from being mis-stripped after the nested pass.
+
+_REFERENCE_PAREN_NESTED_RE = re.compile(
+    r"(?P<lead>[\w가-힯])\s*\((?P<inner>[A-Za-z]+\(\d+\))\)",
+    re.UNICODE,
+)
+_REFERENCE_PAREN_KO_RE = re.compile(
+    r"(?P<lead>[가-힯])\s*\((?P<inner>[^()\n]{1,20})\)",
+)
+_REFERENCE_PAREN_EN_RE = re.compile(
+    r"(?P<lead>[A-Za-z0-9])\s+\((?P<inner>[^()\n]{1,20})\)",
+)
+
+
+def _strip_reference_parens(text: str) -> str:
+    """Strip outer parens from reference-shaped content following a word."""
+    text = _REFERENCE_PAREN_NESTED_RE.sub(
+        lambda m: f"{m.group('lead')} {m.group('inner')}", text
+    )
+
+    def repl_simple(m: re.Match) -> str:
+        inner = m.group("inner").strip()
+        if _is_reference_inner(inner):
+            return f"{m.group('lead')} {inner}"
+        return m.group(0)
+
+    text = _REFERENCE_PAREN_KO_RE.sub(repl_simple, text)
+    text = _REFERENCE_PAREN_EN_RE.sub(repl_simple, text)
+    return text
+
+
 def postprocess(text: str) -> str:
     text = _normalize_unicode(text)
     text = _expand_respectively(text)
     text = _repair_malformed_semicolon_legend(text)
     text = _strip_articles_on_plurals(text)
+    text = _strip_reference_parens(text)
     text = _break_sentences(text)
     text = _break_after_semicolons(text)
     return text
