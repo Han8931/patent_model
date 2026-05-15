@@ -38,7 +38,11 @@ LOCAL_DIRS: list[str] = [
 OUTPUT_DIR = Path("output")
 OUTPUT_SUFFIX = "_en"   # appended to <input_stem> when no --output-name is given
 
-CONFIG = ClientConfig.from_env()   # reads LLM_* variables from .env
+# Default provider is "openai" (reads LLM_* env vars). Pass --gauss on the
+# command line to switch to the Samsung Gauss-O4 endpoint (reads GAUSS_*
+# env vars and adds the required identity / per-call UUID headers).
+# CONFIG is built inside main() once we've parsed argv, since the env
+# variables read depend on which provider the user picked.
 
 WORKERS = 4          # parallel files; keep ≤ Ollama concurrency limit
 BATCH_SIZE = 10      # max paragraphs per section batch sent to the LLM
@@ -141,6 +145,14 @@ def _parse_args() -> argparse.Namespace:
         help="Explicit output filename (e.g. 'mydoc_en.docx'). Only valid for a "
              "single input file; ignored with a warning if multiple inputs are found.",
     )
+    parser.add_argument(
+        "--gauss",
+        action="store_true",
+        help="Route LLM calls to the Samsung Gauss-O4 endpoint instead of the "
+             "default OpenAI-compatible endpoint. Reads GAUSS_BASE_URL, "
+             "GAUSS_API_KEY, GAUSS_CREDENTIAL, GAUSS_USER_ID, GAUSS_SYSTEM_NAME "
+             "and GAUSS_USER_TYPE from .env.",
+    )
     return parser.parse_args()
 
 
@@ -156,6 +168,12 @@ def _output_path_for(inp: Path, args: argparse.Namespace, single_input: bool) ->
 def main() -> None:
     args = _parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Pick provider once (per batch run); the same config is shipped to every
+    # worker via job["config"]. --gauss reads GAUSS_* env vars and will raise
+    # at LLMClient construction time if any of base_url / credential / user_id
+    # is missing.
+    config = ClientConfig.from_env(provider="gauss" if args.gauss else "openai")
 
     input_files = _resolve_files()
     if not input_files:
@@ -174,7 +192,7 @@ def main() -> None:
         {
             "input":          str(inp),
             "output":         str(_output_path_for(inp, args, single)),
-            "config":      asdict(CONFIG),
+            "config":      asdict(config),
             "batch_size":  BATCH_SIZE,
             "review":      REVIEW,
             "font":             FONT,
@@ -183,7 +201,8 @@ def main() -> None:
         for inp in input_files
     ]
 
-    print(f"Batch: {len(jobs)} file(s), {WORKERS} worker(s)\n")
+    provider_label = "Gauss-O4" if args.gauss else "OpenAI-compatible"
+    print(f"Batch: {len(jobs)} file(s), {WORKERS} worker(s), provider={provider_label}\n")
 
     with mp.Pool(processes=min(WORKERS, len(jobs))) as pool:
         results = pool.map(_translate_file, jobs)
