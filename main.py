@@ -13,7 +13,12 @@ def parse_args() -> argparse.Namespace:
     import os
     load_dotenv()
 
-    env = ClientConfig.from_env()  # used only to derive defaults for help text
+    # Resolve which provider to base the help-text defaults on. We read
+    # argv directly (a tiny parse) because the real argparse cycle below
+    # needs the provider to populate help-text defaults.
+    import sys as _sys
+    use_gauss = "--gauss" in _sys.argv
+    env = ClientConfig.from_env(provider="gauss" if use_gauss else "openai")
 
     parser = argparse.ArgumentParser(
         description="Translate a Korean patent application docx to English."
@@ -26,6 +31,14 @@ def parse_args() -> argparse.Namespace:
         help="Output path: a .docx file or a directory (default: output/)",
     )
     parser.add_argument(
+        "--gauss",
+        action="store_true",
+        help="Route LLM calls to the Samsung Gauss-O4 endpoint instead of the "
+             "default OpenAI-compatible endpoint. Reads GAUSS_BASE_URL, "
+             "GAUSS_API_KEY, GAUSS_CREDENTIAL, GAUSS_USER_ID, GAUSS_SYSTEM_NAME "
+             "and GAUSS_USER_TYPE from .env.",
+    )
+    parser.add_argument(
         "--model", default=env.model,
         help=f"Model name (default: {env.model})",
     )
@@ -35,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--api-key", default=env.api_key,
-        help="API key (overrides LLM_API_KEY in .env)",
+        help="API key (overrides LLM_API_KEY / GAUSS_API_KEY in .env)",
     )
     parser.add_argument(
         "--temperature", type=float, default=env.temperature,
@@ -88,13 +101,16 @@ def resolve_output(input_path: Path, output_arg: Path | None) -> Path:
 def main() -> None:
     args = parse_args()
 
-    config = ClientConfig(
-        model=args.model,
-        base_url=args.base_url,
-        api_key=args.api_key,
-        temperature=args.temperature,
-        max_tokens=args.max_tokens,
-    )
+    # Start from env-loaded defaults for the chosen provider, then override
+    # with anything the user passed via CLI. This keeps the Gauss-specific
+    # header fields (credential, user_id, etc.) intact while letting --model
+    # / --base-url / --api-key etc. still work as overrides.
+    config = ClientConfig.from_env(provider="gauss" if args.gauss else "openai")
+    config.model = args.model
+    config.base_url = args.base_url
+    config.api_key = args.api_key
+    config.temperature = args.temperature
+    config.max_tokens = args.max_tokens
 
     output = resolve_output(args.input, args.output)
 
