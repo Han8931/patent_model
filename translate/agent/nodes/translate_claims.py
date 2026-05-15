@@ -44,12 +44,18 @@ _MD_BULLET_LINE_RE = re.compile(r"^[ \t]*[-*+]\s+", flags=re.MULTILINE)
 
 
 _MD_STRAY_BOLD_RE = re.compile(r"\*\*+")
+# Markdown horizontal rule: a line containing only '---', '***', or '==='
+# (3 or more). The model sometimes uses these to separate sections.
+_MD_HR_RE = re.compile(
+    r"^[ \t]*(?:-{3,}|\*{3,}|_{3,}|={3,})[ \t]*\n?", flags=re.MULTILINE
+)
 
 
 def _strip_markdown(text: str) -> str:
     text = _MD_BOLD_RE.sub(r"\1", text)
     text = _MD_BOLD_UNDERSCORE_RE.sub(r"\1", text)
     text = _MD_BULLET_LINE_RE.sub("", text)
+    text = _MD_HR_RE.sub("", text)
     # Defensive: strip stray '**' the pair regex couldn't match (e.g. '**1.'
     # with no closing pair, or mismatched runs like '**A device.***').
     text = _MD_STRAY_BOLD_RE.sub("", text)
@@ -110,24 +116,38 @@ def _minimal_cleanup(claim_num: int, raw_text: str) -> str:
     text = _strip_markdown(text)
     text = _normalize_claim_breaks(text)
     text = _indent_after_colon(text)
-    # Normalize the leading "N." prefix so claim text always sits next to the
-    # number with a single space — and the number always matches the chunk's
-    # canonical claim_num. The bulk model sometimes echoes its own numbering
-    # (e.g. starts every claim with "1." regardless of which claim it is); we
-    # overwrite that with the real number from the chunk.
+    # Normalize the leading claim-number prefix so the text always sits next
+    # to the number with a single space — and the number always matches the
+    # chunk's canonical claim_num. The bulk model uses every conceivable
+    # numbering shape; we match them all and overwrite.
     #
     # Shapes handled:
-    #   "1.\nA device"   → "<N>. A device"
-    #   "1.A device"     → "<N>. A device"
-    #   "1.   A device"  → "<N>. A device"
-    #   "A device"       → "<N>. A device"  (prepended)
-    leading_re = re.compile(r'^\s*\d+\s*\.\s*')
-    m = leading_re.match(text)
+    #   "1. A device"            "1.A device"
+    #   "1.\nA device"           "1)   A device"
+    #   "1: A device"            "Claim 1: A device"
+    #   "Claim 1.\nA device"     "# 1. A device"
+    #   "### Claim 1: A device"  "[Claim 1]"
+    #
+    # "A device" with no leading prefix gets "<N>. " prepended.
+    m = _LEADING_CLAIM_PREFIX_RE.match(text)
     if m:
         text = f"{claim_num}. " + text[m.end():]
     else:
         text = f"{claim_num}. {text}"
     return text
+
+
+_LEADING_CLAIM_PREFIX_RE = re.compile(
+    r'^'
+    r'\s*'                       # leading whitespace
+    r'\[?'                       # optional opening bracket
+    r'(?:#{1,6}\s*)?'            # optional markdown heading marks
+    r'(?:claim\s+)?'             # optional "Claim " word
+    r'\d+'                       # the number itself
+    r'\s*[.:)\]]?'               # optional separator: '.', ':', ')', ']'
+    r'\s*',                      # trailing whitespace before claim text
+    flags=re.IGNORECASE,
+)
 
 
 def _assert_claims_translated(chunks: list[Chunk]) -> None:
