@@ -10,6 +10,7 @@ import traceback
 _HANGUL_RE = re.compile(r"[가-힯]")
 
 from ..docx_utils import (
+    clear_paragraph_indent,
     consolidate_formula_math_into,
     equations_in_paragraph,
     extract_equation_variables,
@@ -467,6 +468,8 @@ def _apply_chunk_with_standalone_equations(chunk: Chunk, records, font: str):
     parts = _redistribute_grouped_parameters(parts, equation_indices, records)
 
     replace_text(records[head_idx].para, parts[0].strip(), font)
+    if chunk.kind == "claim":
+        clear_paragraph_indent(records[head_idx].para)
 
     for eq_idx in equation_indices:
         # Clear any surrounding Korean text but leave the equation XML and its
@@ -542,6 +545,13 @@ def _apply_chunk(chunk: Chunk, records, font: str):
         consolidate_formula_math_into(head_record.para, trailing)
 
     replace_text(head_record.para, chunk.translation, font)
+
+    # For claims, strip the source paragraph's firstLine/hanging/left indent
+    # so the rendered docx puts the claim number flush at the left margin.
+    # Without this, Korean templates with <w:ind> set on claim paragraphs
+    # display the '1.' visually pushed in by the inherited indent.
+    if chunk.kind == "claim":
+        clear_paragraph_indent(head_record.para)
 
     # Blank the trailing paragraphs. For claims, remove them entirely so the
     # original claim body paragraph does not remain as an empty line after the

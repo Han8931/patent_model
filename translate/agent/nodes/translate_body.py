@@ -13,6 +13,7 @@ from ..prompts import (
     build_segment_messages,
     parse_body_simple_response,
 )
+from .translate_claims import _strip_markdown
 from ..paragraph_translator import (
     chunk_needs_per_paragraph,
     translate_chunk_per_paragraph,
@@ -32,6 +33,10 @@ def _contains_hangul(text: str | None) -> bool:
 
 
 def _apply_paragraph_id_prefix(chunk: Chunk, text: str) -> str:
+    # The minimal body prompt sometimes returns markdown decorations
+    # (**bold**, leading bullets, `---` rules). Strip those before
+    # postprocess so the docx output is clean prose.
+    text = _strip_markdown(text)
     translated = postprocess(text)
     # Re-attach the head paragraph's '[NNN]' ID that chunk_body stripped before
     # sending to the LLM. If the model already emitted it, keep exactly one.

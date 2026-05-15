@@ -75,6 +75,28 @@ def remove_paragraph(para) -> None:
         parent.remove(p)
 
 
+def clear_paragraph_indent(para) -> None:
+    """Strip first-line / hanging / left indent from this paragraph.
+
+    Many Korean patent templates set <w:ind w:firstLine="…"> on claim
+    paragraphs, which Word renders as visual indentation before the very
+    first character ('1.'). When we replace the Korean text with our
+    USPTO-formatted translation, that indent is no longer wanted — the
+    canonical layout is the claim number flush with the left margin and
+    each element line carrying its own <w:tab/> for the listing indent.
+
+    Removes the <w:ind> child of <w:pPr> entirely if present. Safe to call
+    on paragraphs that have no indent configured.
+    """
+    p = para._p
+    pPr = p.find(qn('w:pPr'))
+    if pPr is None:
+        return
+    ind = pPr.find(qn('w:ind'))
+    if ind is not None:
+        pPr.remove(ind)
+
+
 def text_runs(para) -> list:
     return [r for r in para.runs if r.text]
 
