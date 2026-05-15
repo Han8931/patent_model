@@ -134,7 +134,17 @@ def translate_body(state: TranslationState) -> dict:
                         f"{type(exc).__name__}: {exc}"
                     )
             if en:
-                chunk.translation = _apply_paragraph_id_prefix(chunk, en)
+                translated = _apply_paragraph_id_prefix(chunk, en)
+                if _contains_hangul(translated):
+                    chunk.translation = ""
+                    if verbose:
+                        print(
+                            f"  translate_body chunk {chunk.id} (sentence-level): "
+                            "response still contains Korean after retry; "
+                            "leaving source paragraph untouched"
+                        )
+                else:
+                    chunk.translation = translated
             else:
                 chunk.translation = ""
             if not chunk.translation:
@@ -153,38 +163,60 @@ def translate_body(state: TranslationState) -> dict:
         # NEVER overwritten by description-only translations — the body can
         # only extend the glossary, not redefine it.
         messages = build_body_simple_messages(chunk.text, glossary)
+        chunk.translation = ""
         try:
             raw = client.complete(messages)
             translation_text, new_terms = parse_body_simple_response(raw)
             text = clean_translation_text(translation_text)
-            if not text:
-                chunk.translation = ""
+            translated = _apply_paragraph_id_prefix(chunk, text) if text else ""
+
+            # Retry once if the response is empty or still contains Korean.
+            # A second pass with an explicit "English only" reminder often
+            # rescues chunks the bare bulk-simple prompt missed — leaving
+            # the source Korean visible would otherwise look like a bug.
+            if not translated or _contains_hangul(translated):
+                problem = (
+                    "empty/placeholder response"
+                    if not translated else "response still contained Korean characters"
+                )
                 if verbose:
                     print(
-                        f"  translate_body chunk {chunk.id}: "
-                        "empty response."
+                        f"  translate_body chunk {chunk.id}: retry ({problem})"
                     )
-            else:
-                translated = _apply_paragraph_id_prefix(chunk, text)
-                if _contains_hangul(translated):
-                    chunk.translation = ""
-                    if verbose:
-                        print(
-                            f"  translate_body chunk {chunk.id}: "
-                            "response still contains Korean."
-                        )
-                else:
-                    chunk.translation = translated
-                    added = 0
-                    for ko, en in new_terms.items():
-                        if ko not in glossary:
-                            glossary[ko] = en
-                            added += 1
-                    if verbose and added:
-                        print(
-                            f"  translate_body chunk {chunk.id}: "
-                            f"glossary extended with {added} new term(s)"
-                        )
+                retry_messages = messages + [{
+                    "role": "user",
+                    "content": (
+                        "Your previous response was unusable. "
+                        f"Problem: {problem}. "
+                        "Translate the Korean text above into English. "
+                        "Output English only — no Korean characters anywhere, "
+                        "no markdown, no commentary. "
+                        "Keep every [EQUATION_N] marker verbatim and in the "
+                        "same relative position."
+                    ),
+                }]
+                raw = client.complete(retry_messages)
+                translation_text, new_terms = parse_body_simple_response(raw)
+                text = clean_translation_text(translation_text)
+                translated = _apply_paragraph_id_prefix(chunk, text) if text else ""
+
+            if translated and not _contains_hangul(translated):
+                chunk.translation = translated
+                added = 0
+                for ko, en in new_terms.items():
+                    if ko not in glossary:
+                        glossary[ko] = en
+                        added += 1
+                if verbose and added:
+                    print(
+                        f"  translate_body chunk {chunk.id}: "
+                        f"glossary extended with {added} new term(s)"
+                    )
+            elif verbose:
+                print(
+                    f"  translate_body chunk {chunk.id}: "
+                    "still empty/Korean after retry"
+                )
         except Exception as exc:
             chunk.translation = ""
             if verbose:

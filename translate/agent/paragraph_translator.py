@@ -36,6 +36,7 @@ from ..agent.docx_utils import (
     replace_text,
 )
 from ..agent.glossary import clean_translation_text, extract_json_block, merge_terms
+from .nodes.translate_claims import _strip_markdown
 from .sentence_translator import (
     _LEGEND_HEADER_RE,
     needs_per_segment_translation,
@@ -190,6 +191,11 @@ def translate_paragraph_in_place(
     if id_prefix and not en.lstrip().startswith(id_prefix):
         en = f"{id_prefix} {en.lstrip()}"
 
+    # The minimal segment / clause prompts sometimes return markdown
+    # decorations (**bold**, leading bullets, '---' rules). Strip them
+    # before postprocess so the docx output stays plain prose, matching
+    # the chunk-level body path.
+    en = _strip_markdown(en)
     en = postprocess(en)
     if use_symbol_legend:
         en = _replace_inline_symbols_with_markers(en, record)

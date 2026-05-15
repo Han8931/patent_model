@@ -34,6 +34,8 @@ from typing import Callable, Optional
 
 from .glossary import clean_translation_text, extract_json_block, merge_terms
 
+_HANGUL_RE = re.compile(r"[가-힯]")
+
 
 _EQUATION_TOKEN_RE = re.compile(r"\[EQUATION(?:_\d+)?\]")
 # Paragraph-ID markers like '[0075]'. 1–5 digits; we deliberately match anywhere
@@ -125,16 +127,48 @@ def split_into_clauses(text: str) -> list[tuple[str, str]]:
 # ---------------------------------------------------------------------------
 
 def _llm_text(client, messages: list[dict]) -> str:
-    """Run one LLM call and return cleaned plain text, or '' on failure."""
-    try:
-        raw = client.complete(messages)
-    except Exception:
-        return ""
-    data = extract_json_block(raw) or {}
-    text = clean_translation_text(data.get("text"))
-    if text:
-        return text
-    return clean_translation_text(raw)
+    """Run one LLM call → cleaned English text. Retries once on empty/Korean.
+
+    The minimal segment/clause prompts occasionally return empty content
+    or text that still has Korean characters in it (most often with weaker
+    models or rate-limited responses). Without retry, that Korean would
+    propagate up through ``translate_text_segment`` / ``translate_chunk_by_sentence``
+    into the docx as if it were a translation. One corrective follow-up
+    message reminding the model "English only, no Korean characters"
+    rescues most of those failures.
+    """
+    def _call(msgs: list[dict]) -> str:
+        try:
+            raw = msgs and client.complete(msgs) or ""
+        except Exception:
+            return ""
+        if raw is None:
+            return ""
+        data = extract_json_block(raw) or {}
+        text = clean_translation_text(data.get("text"))
+        if not text:
+            text = clean_translation_text(raw)
+        return text or ""
+
+    text = _call(messages)
+    if not text or _HANGUL_RE.search(text):
+        problem = (
+            "empty/placeholder response"
+            if not text else "response still contained Korean characters"
+        )
+        retry = messages + [{
+            "role": "user",
+            "content": (
+                "Your previous response was unusable. "
+                f"Problem: {problem}. "
+                "Translate the Korean above into English. "
+                "Output English only — no Korean characters anywhere, "
+                "no markdown, no commentary. "
+                "Keep any [EQUATION_N] marker verbatim and in the same position."
+            ),
+        }]
+        text = _call(retry)
+    return text
 
 
 def translate_text_segment(

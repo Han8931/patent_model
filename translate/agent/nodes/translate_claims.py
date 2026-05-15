@@ -42,6 +42,18 @@ _MD_BOLD_RE = re.compile(r"\*\*([^*\n]+?)\*\*")
 _MD_BOLD_UNDERSCORE_RE = re.compile(r"__([^_\n]+?)__")
 _MD_BULLET_LINE_RE = re.compile(r"^[ \t]*[-*+]\s+", flags=re.MULTILINE)
 
+# ATX-style headings: `#`, `##`, …, `######` at the start of a line, plus the
+# trailing space(s) before the heading text.
+_MD_HEADING_LINE_RE = re.compile(r"^[ \t]*#{1,6}[ \t]+", flags=re.MULTILINE)
+
+# Markdown blockquote prefix at line start.
+_MD_BLOCKQUOTE_RE = re.compile(r"^[ \t]*>[ \t]?", flags=re.MULTILINE)
+
+# Inline code: `code`. Keep content, drop the backticks.
+_MD_INLINE_CODE_RE = re.compile(r"`([^`\n]+?)`")
+
+# Markdown link: [text](url) → keep text only.
+_MD_LINK_RE = re.compile(r"\[([^\]\n]+?)\]\(([^)\n]+?)\)")
 
 _MD_STRAY_BOLD_RE = re.compile(r"\*\*+")
 # Markdown horizontal rule: a line containing only '---', '***', or '==='
@@ -54,6 +66,10 @@ _MD_HR_RE = re.compile(
 def _strip_markdown(text: str) -> str:
     text = _MD_BOLD_RE.sub(r"\1", text)
     text = _MD_BOLD_UNDERSCORE_RE.sub(r"\1", text)
+    text = _MD_HEADING_LINE_RE.sub("", text)
+    text = _MD_BLOCKQUOTE_RE.sub("", text)
+    text = _MD_INLINE_CODE_RE.sub(r"\1", text)
+    text = _MD_LINK_RE.sub(r"\1", text)
     text = _MD_BULLET_LINE_RE.sub("", text)
     text = _MD_HR_RE.sub("", text)
     # Defensive: strip stray '**' the pair regex couldn't match (e.g. '**1.'
