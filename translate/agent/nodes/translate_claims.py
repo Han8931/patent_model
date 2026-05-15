@@ -43,55 +43,89 @@ _MD_BOLD_UNDERSCORE_RE = re.compile(r"__([^_\n]+?)__")
 _MD_BULLET_LINE_RE = re.compile(r"^[ \t]*[-*+]\s+", flags=re.MULTILINE)
 
 
+_MD_STRAY_BOLD_RE = re.compile(r"\*\*+")
+
+
 def _strip_markdown(text: str) -> str:
     text = _MD_BOLD_RE.sub(r"\1", text)
     text = _MD_BOLD_UNDERSCORE_RE.sub(r"\1", text)
     text = _MD_BULLET_LINE_RE.sub("", text)
+    # Defensive: strip stray '**' the pair regex couldn't match (e.g. '**1.'
+    # with no closing pair, or mismatched runs like '**A device.***').
+    text = _MD_STRAY_BOLD_RE.sub("", text)
     return text
 
 
 # --- Claim line-break normalization ---------------------------------------
-# The bulk model sometimes returns a claim as one long line and sometimes
-# pre-breaks it. We need both paths to land at the same USPTO layout:
-#   "comprising:\n\ta foo;\n\ta bar; and\n\ta baz."
+# Two-step approach, idempotent end-to-end:
 #
-# Order matters: the '; and' joiner is matched first so the plain '; ' rule
-# cannot consume its leading semicolon. The lookaheads keep the rules from
-# re-matching whitespace that's already a '\n\t' indent (so the function is
-# idempotent — running twice produces the same output).
-_BREAK_SEMI_AND_RE = re.compile(r";[ \t]+and[ \t]+(?=\S)")
+#   1. COLLAPSE phase — normalize every shape the model emits into ONE
+#      canonical form. After collapse, every claim-element separator is
+#      exactly "; " (semicolon + single space) and every list-opening colon
+#      is exactly "<verb>: ". Newlines, tabs, double newlines, leading
+#      indentation on continuation lines, and missing spaces all dissolve.
+#
+#   2. BREAK phase — insert the desired '\n\t' breaks against the now-uniform
+#      input. Order matters: "; and " is matched first so the plain "; "
+#      rule cannot consume its leading semicolon.
+#
+# This handles weirdness from the model that pure break-insertion couldn't
+# catch:
+#     "; \n and "   → "; and\n\t"
+#     ";\n\n"       → ";\n\t" (no blank indented line)
+#     ";a bar"      → ";\n\ta bar" (no-space case)
+#     "\n  a foo;"  → "\n\ta foo;" (mixed leading whitespace stripped)
+_COLLAPSE_SEMI_RE = re.compile(r";[ \t\n\r]*(?=\S)")
+_COLLAPSE_COLON_VERB_RE = re.compile(
+    r"\b(comprising|including|having|consisting(?:\s+(?:essentially\s+)?of)?)"
+    r"[ \t]*:[ \t\n\r]*(?=\S)",
+    re.IGNORECASE,
+)
+
+_BREAK_SEMI_AND_RE = re.compile(r";[ \t]+and\s+(?=\S)")
 _BREAK_SEMI_RE = re.compile(r";[ \t]+(?!and\b)(?=\S)")
 _BREAK_COLON_VERB_RE = re.compile(
     r"\b(comprising|including|having|consisting(?:\s+(?:essentially\s+)?of)?)"
     r"[ \t]*:[ \t]+(?=\S)",
     re.IGNORECASE,
 )
-_INDENT_AFTER_SEMICOLON_NL_RE = re.compile(rf";[ \t]*\n(?!{_SEMICOLON_INDENT})")
-_INDENT_AFTER_SEMI_AND_NL_RE = re.compile(
-    rf";[ \t]*and[ \t]*\n(?!{_SEMICOLON_INDENT})"
-)
 
 
 def _normalize_claim_breaks(text: str) -> str:
-    # Insert breaks where missing.
+    # Step 1: collapse every '; <whitespace>' shape to '; '.
+    text = _COLLAPSE_SEMI_RE.sub("; ", text)
+    text = _COLLAPSE_COLON_VERB_RE.sub(lambda m: f"{m.group(1)}: ", text)
+    # Step 2: insert the canonical USPTO breaks.
     text = _BREAK_SEMI_AND_RE.sub(f"; and\n{_SEMICOLON_INDENT}", text)
     text = _BREAK_SEMI_RE.sub(f";\n{_SEMICOLON_INDENT}", text)
     text = _BREAK_COLON_VERB_RE.sub(
         lambda m: f"{m.group(1)}:\n{_SEMICOLON_INDENT}", text
     )
-    # Normalize breaks already present.
-    text = _INDENT_AFTER_SEMI_AND_NL_RE.sub(f"; and\n{_SEMICOLON_INDENT}", text)
-    text = _INDENT_AFTER_SEMICOLON_NL_RE.sub(f";\n{_SEMICOLON_INDENT}", text)
     return text
 
 
 def _minimal_cleanup(claim_num: int, raw_text: str) -> str:
-    """Strip markdown, normalize claim line breaks, prepend 'N. ' if missing."""
+    """Strip markdown, normalize claim line breaks, normalize 'N. ' prefix."""
     text = _normalize_unicode(raw_text.strip())
     text = _strip_markdown(text)
     text = _normalize_claim_breaks(text)
     text = _indent_after_colon(text)
-    if not re.match(rf'^\s*{claim_num}\s*\.\s', text):
+    # Normalize the leading "N." prefix so claim text always sits next to the
+    # number with a single space — and the number always matches the chunk's
+    # canonical claim_num. The bulk model sometimes echoes its own numbering
+    # (e.g. starts every claim with "1." regardless of which claim it is); we
+    # overwrite that with the real number from the chunk.
+    #
+    # Shapes handled:
+    #   "1.\nA device"   → "<N>. A device"
+    #   "1.A device"     → "<N>. A device"
+    #   "1.   A device"  → "<N>. A device"
+    #   "A device"       → "<N>. A device"  (prepended)
+    leading_re = re.compile(r'^\s*\d+\s*\.\s*')
+    m = leading_re.match(text)
+    if m:
+        text = f"{claim_num}. " + text[m.end():]
+    else:
         text = f"{claim_num}. {text}"
     return text
 
