@@ -121,7 +121,12 @@ class LLMClient:
         if extra_headers:
             kwargs["extra_headers"] = extra_headers
         response = self._client.chat.completions.create(**kwargs)
-        return response.choices[0].message.content
+        # Some providers (including Gauss) can return content=None when the
+        # response is empty / filtered / cut off at max_tokens. Downstream
+        # parsers call `.strip()` on the result, so collapse None to "" here
+        # rather than letting the AttributeError surface deep in the pipeline.
+        content = response.choices[0].message.content
+        return content if content is not None else ""
 
     def stream(self, messages: list[dict]) -> Iterator[str]:
         kwargs = {

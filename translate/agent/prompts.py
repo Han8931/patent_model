@@ -689,8 +689,10 @@ def build_claims_bulk_messages(
     ]
 
 
-def _strip_bulk_response_fences(raw: str) -> str:
+def _strip_bulk_response_fences(raw: str | None) -> str:
     import re as _re
+    if not raw:
+        return ""
     text = raw.strip()
     if text.startswith("```"):
         text = _re.sub(r"^```[a-zA-Z]*\n", "", text)
