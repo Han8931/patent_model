@@ -20,7 +20,11 @@ from __future__ import annotations
 import re
 
 from ..docx_utils import _SEMICOLON_INDENT, _indent_after_colon, _normalize_unicode
-from ..prompts import build_claims_bulk_messages, parse_claims_bulk_response
+from ..prompts import (
+    build_claims_bulk_messages,
+    parse_claims_bulk_glossary,
+    parse_claims_bulk_response,
+)
 from ..state import Chunk, TranslationState
 
 
@@ -115,6 +119,7 @@ def translate_claims(state: TranslationState) -> dict:
     client = state["client"]
     progress = state.get("progress") or (lambda _: None)
     verbose = state.get("verbose", False)
+    glossary = dict(state.get("glossary", {}))
 
     valid = [c for c in chunks if c.claim_num is not None]
     total = len(valid)
@@ -134,11 +139,17 @@ def translate_claims(state: TranslationState) -> dict:
         ) from exc
 
     by_num = parse_claims_bulk_response(raw)
+    claims_glossary = parse_claims_bulk_glossary(raw)
     if verbose:
         missing = [c.claim_num for c in valid if c.claim_num not in by_num]
         if missing:
             print(
                 f"  translate_claims: bulk response missing claim(s): {missing}"
+            )
+        if claims_glossary:
+            print(
+                f"  translate_claims: seeded glossary with {len(claims_glossary)} "
+                "term(s) from claim translations"
             )
 
     for chunk in valid:
@@ -148,5 +159,10 @@ def translate_claims(state: TranslationState) -> dict:
             continue
         chunk.translation = _minimal_cleanup(chunk.claim_num, text)
 
+    # Claim-derived terms SEED the glossary. The body translator extends it
+    # later for description-only terms that claims don't name.
+    for ko, en in claims_glossary.items():
+        glossary.setdefault(ko, en)
+
     _assert_claims_translated(valid)
-    return {"chunks_claims": chunks}
+    return {"chunks_claims": chunks, "glossary": glossary}

@@ -589,12 +589,18 @@ def build_claim_retry_messages(
 
 _BULK_CLAIMS_DELIMITER = "===== CLAIM {n} ====="
 _BULK_CLAIMS_DELIM_RE_FMT = r"=====\s*CLAIM\s+(\d+)\s*====="
+_BULK_GLOSSARY_BANNER = "===== GLOSSARY ====="
+_BULK_GLOSSARY_BANNER_RE = r"=====\s*GLOSSARY\s*====="
 
 BULK_CLAIMS_SYSTEM = (
     "Translate these claims into USPTO style. "
     "Preserve every [EQUATION_N] marker verbatim and in the same relative "
     "position. Return each claim's English under the same '===== CLAIM N ====='"
-    " banner that precedes it in the input."
+    " banner that precedes it in the input. "
+    "After the last claim, add a final '===== GLOSSARY =====' banner and list "
+    "the key Korean→English noun-phrase pairs you used (components, materials, "
+    "processes), one per line as 'korean → english'. The glossary seeds the "
+    "description translator so it can keep terminology consistent with the claims."
 )
 
 
@@ -605,7 +611,8 @@ def build_claims_bulk_messages(
 
     ``claims`` is a list of (claim_num, korean_text) pairs in source order.
     The model returns the same banner format; ``parse_claims_bulk_response``
-    splits it back into per-claim translations.
+    splits it back into per-claim translations and ``parse_claims_bulk_glossary``
+    extracts the trailing Korean→English glossary.
     """
     parts: list[str] = []
     for num, text in claims:
@@ -618,26 +625,62 @@ def build_claims_bulk_messages(
     ]
 
 
-def parse_claims_bulk_response(raw: str) -> dict[int, str]:
-    """Split the model's bulk response back into ``{claim_num: english}``.
-
-    Tolerant of leading/trailing whitespace, fenced code blocks, and JSON
-    wrappers — but expects each claim's English to follow its banner line.
-    """
+def _strip_bulk_response_fences(raw: str) -> str:
     import re as _re
     text = raw.strip()
-    # Strip ``` fences if the model wrapped its output.
     if text.startswith("```"):
         text = _re.sub(r"^```[a-zA-Z]*\n", "", text)
         text = _re.sub(r"\n```\s*$", "", text)
+    return text
+
+
+def parse_claims_bulk_response(raw: str) -> dict[int, str]:
+    """Split the model's bulk response back into ``{claim_num: english}``.
+
+    The trailing '===== GLOSSARY =====' section (if present) is truncated off
+    the last claim's text so glossary lines don't leak into the final claim.
+    """
+    import re as _re
+    text = _strip_bulk_response_fences(raw)
+    glossary_match = _re.search(_BULK_GLOSSARY_BANNER_RE, text)
+    body = text[: glossary_match.start()] if glossary_match else text
+
     banner_re = _re.compile(_BULK_CLAIMS_DELIM_RE_FMT)
     out: dict[int, str] = {}
-    matches = list(banner_re.finditer(text))
+    matches = list(banner_re.finditer(body))
     for i, m in enumerate(matches):
         num = int(m.group(1))
         start = m.end()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        out[num] = text[start:end].strip()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
+        out[num] = body[start:end].strip()
+    return out
+
+
+def parse_claims_bulk_glossary(raw: str) -> dict[str, str]:
+    """Extract the trailing '===== GLOSSARY =====' section as ``{ko: en}``.
+
+    Each glossary line is expected as ``korean → english`` (with the proper
+    '→' arrow or an ASCII '->' fallback). Lines that don't match are skipped.
+    Empty input or missing glossary banner returns ``{}``.
+    """
+    import re as _re
+    text = _strip_bulk_response_fences(raw)
+    match = _re.search(_BULK_GLOSSARY_BANNER_RE, text)
+    if not match:
+        return {}
+    block = text[match.end():].strip()
+    out: dict[str, str] = {}
+    line_re = _re.compile(r"^\s*(.+?)\s*(?:→|->)\s*(.+?)\s*$")
+    for line in block.splitlines():
+        line = line.strip()
+        if not line or line.startswith("```"):
+            continue
+        m = line_re.match(line)
+        if not m:
+            continue
+        ko, en = m.group(1).strip(), m.group(2).strip()
+        if ko and en and "→" not in en and "->" not in en:
+            out[ko] = en
     return out
 
 
