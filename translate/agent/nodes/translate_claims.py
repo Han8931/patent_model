@@ -151,18 +151,72 @@ _LEADING_CLAIM_PREFIX_RE = re.compile(
 
 
 def _assert_claims_translated(chunks: list[Chunk]) -> None:
+    """Backwards-compatible alias used by the review node after revision.
+
+    Previously this raised RuntimeError on any failed claim, killing the run.
+    Now it only logs a warning — partial Korean in the claims section is
+    handled the same way it is for body / abstract: the writer leaves those
+    paragraphs untouched and the user gets a heads-up at the end.
+    """
+    def _print(msg: str) -> None:
+        print(msg, flush=True)
+    _report_claim_failures(chunks, _print)
+
+
+def _report_claim_failures(chunks: list[Chunk], progress) -> list[int]:
+    """Return the list of claim_nums still missing or still Korean.
+
+    The old behavior was to raise RuntimeError on any failure, which killed
+    the whole run when even one claim came back garbled. That's too strict —
+    body and abstract just leave the source paragraph untouched and keep
+    going. Match that here: log a clear warning so the user knows which
+    claims to inspect, but let the writer continue with whatever translated
+    claims we got.
+    """
     failed = [
-        str(c.claim_num)
+        c.claim_num
         for c in chunks
         if c.claim_num is not None
         and (not c.translation or _contains_hangul(c.translation))
     ]
     if failed:
-        raise RuntimeError(
-            "Claim translation failed for claim(s): "
-            + ", ".join(failed)
-            + ". Refusing to write a partially Korean claims section."
+        progress(
+            "WARNING: CLAIMS translation unavailable for claim(s): "
+            + ", ".join(str(n) for n in failed)
+            + ". Those claim paragraphs will remain unchanged unless the final "
+              "Korean-ratio check aborts the file."
         )
+    return failed
+
+
+def _run_bulk_claims(
+    client,
+    pairs: list[tuple[int, str]],
+    *,
+    retry_problem: str | None = None,
+) -> tuple[dict[int, str], dict[str, str]]:
+    """One bulk LLM call → ({claim_num: english}, {ko: en}).
+
+    When ``retry_problem`` is set, an extra corrective user message is
+    appended to the standard bulk prompt — used for the retry pass.
+    """
+    messages = build_claims_bulk_messages(pairs)
+    if retry_problem:
+        messages = messages + [{
+            "role": "user",
+            "content": (
+                "Your previous response was unusable. "
+                f"Problem: {retry_problem}. "
+                "Translate the Korean claims above into English now. "
+                "Output English only — no Korean characters anywhere, "
+                "no markdown, no commentary. "
+                "Return each claim under its '===== CLAIM N =====' banner. "
+                "Keep every [EQUATION_N] marker verbatim and in the same "
+                "relative position."
+            ),
+        }]
+    raw = client.complete(messages)
+    return parse_claims_bulk_response(raw), parse_claims_bulk_glossary(raw)
 
 
 def translate_claims(state: TranslationState) -> dict:
@@ -183,40 +237,64 @@ def translate_claims(state: TranslationState) -> dict:
     progress(f"Translating CLAIMS ({total} claims, one bundled call)…")
 
     pairs = [(c.claim_num, c.text) for c in valid]
-    messages = build_claims_bulk_messages(pairs)
-
     try:
-        raw = client.complete(messages)
+        by_num, claims_glossary = _run_bulk_claims(client, pairs)
     except Exception as exc:
-        raise RuntimeError(
-            f"Bulk claim translation call failed: {type(exc).__name__}: {exc}"
-        ) from exc
+        progress(
+            f"WARNING: bulk claim translation call failed: "
+            f"{type(exc).__name__}: {exc}; leaving claim paragraphs untouched"
+        )
+        return {"chunks_claims": chunks, "glossary": glossary}
 
-    by_num = parse_claims_bulk_response(raw)
-    claims_glossary = parse_claims_bulk_glossary(raw)
-    if verbose:
-        missing = [c.claim_num for c in valid if c.claim_num not in by_num]
-        if missing:
-            print(
-                f"  translate_claims: bulk response missing claim(s): {missing}"
-            )
-        if claims_glossary:
-            print(
-                f"  translate_claims: seeded glossary with {len(claims_glossary)} "
-                "term(s) from claim translations"
-            )
-
+    # First pass: apply the cleaned text to every chunk that came back with
+    # usable English.
     for chunk in valid:
         text = by_num.get(chunk.claim_num, "")
-        if not text or _contains_hangul(text):
+        if text and not _contains_hangul(text):
+            chunk.translation = _minimal_cleanup(chunk.claim_num, text)
+        else:
             chunk.translation = ""
-            continue
-        chunk.translation = _minimal_cleanup(chunk.claim_num, text)
+
+    # Retry pass: re-send just the failing claims with a corrective message.
+    still_failing = [c for c in valid if not c.translation]
+    if still_failing:
+        problem = (
+            "some claims were missing or still contained Korean characters"
+        )
+        if verbose:
+            print(
+                f"  translate_claims: retrying {len(still_failing)} claim(s): "
+                f"{[c.claim_num for c in still_failing]}"
+            )
+        try:
+            retry_pairs = [(c.claim_num, c.text) for c in still_failing]
+            retry_by_num, retry_glossary = _run_bulk_claims(
+                client, retry_pairs, retry_problem=problem
+            )
+            for c in still_failing:
+                text = retry_by_num.get(c.claim_num, "")
+                if text and not _contains_hangul(text):
+                    c.translation = _minimal_cleanup(c.claim_num, text)
+            # Merge any additional glossary entries the retry produced.
+            for ko, en in retry_glossary.items():
+                claims_glossary.setdefault(ko, en)
+        except Exception as exc:
+            if verbose:
+                print(
+                    f"  translate_claims: retry call failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+    if verbose and claims_glossary:
+        print(
+            f"  translate_claims: seeded glossary with {len(claims_glossary)} "
+            "term(s) from claim translations"
+        )
 
     # Claim-derived terms SEED the glossary. The body translator extends it
     # later for description-only terms that claims don't name.
     for ko, en in claims_glossary.items():
         glossary.setdefault(ko, en)
 
-    _assert_claims_translated(valid)
+    _report_claim_failures(valid, progress)
     return {"chunks_claims": chunks, "glossary": glossary}
