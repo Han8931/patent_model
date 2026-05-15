@@ -6,12 +6,12 @@ import re
 import time
 
 from ..docx_utils import postprocess
-from ..glossary import clean_translation_text, extract_json_block, merge_terms
+from ..glossary import clean_translation_text
 from ..prompts import (
-    build_body_messages,
-    build_body_retry_messages,
+    build_body_simple_messages,
     build_clause_messages,
     build_segment_messages,
+    parse_body_simple_response,
 )
 from ..paragraph_translator import (
     chunk_needs_per_paragraph,
@@ -29,16 +29,6 @@ _HANGUL_RE = re.compile(r'[가-힯]')
 
 def _contains_hangul(text: str | None) -> bool:
     return bool(text and _HANGUL_RE.search(text))
-
-
-def _extract_body_text(raw: str) -> tuple[str, dict]:
-    data = extract_json_block(raw) or {}
-    text = clean_translation_text(data.get("text"))
-    if not text:
-        # Some models return plain text instead of JSON. This is acceptable,
-        # including paragraph-ID-prefixed text such as "[001] The ...".
-        text = clean_translation_text(raw)
-    return text, data
 
 
 def _apply_paragraph_id_prefix(chunk: Chunk, text: str) -> str:
@@ -150,49 +140,56 @@ def translate_body(state: TranslationState) -> dict:
                 time.sleep(delay)
             continue
 
-        messages = build_body_messages(
-            chunk.text,
-            glossary,
-            equation_context=chunk.equation_context,
-        )
-        last_problem = ""
-        for attempt in range(2):
-            try:
-                raw = client.complete(messages)
-                text, data = _extract_body_text(raw)
-                if not text:
-                    last_problem = "The response did not contain usable English text."
+        # Pure-prose chunks: single bulk-simple call, plain text response.
+        # The claim translator already seeded `glossary`; the simple prompt
+        # injects it into the system message and asks the model to append a
+        # '===== GLOSSARY =====' block of any NEW terms it introduced. We
+        # merge those back with `setdefault` so claim-derived terms are
+        # NEVER overwritten by description-only translations — the body can
+        # only extend the glossary, not redefine it.
+        messages = build_body_simple_messages(chunk.text, glossary)
+        try:
+            raw = client.complete(messages)
+            translation_text, new_terms = parse_body_simple_response(raw)
+            text = clean_translation_text(translation_text)
+            if not text:
+                chunk.translation = ""
+                if verbose:
+                    print(
+                        f"  translate_body chunk {chunk.id}: "
+                        "empty response."
+                    )
+            else:
+                translated = _apply_paragraph_id_prefix(chunk, text)
+                if _contains_hangul(translated):
+                    chunk.translation = ""
+                    if verbose:
+                        print(
+                            f"  translate_body chunk {chunk.id}: "
+                            "response still contains Korean."
+                        )
                 else:
-                    translated = _apply_paragraph_id_prefix(chunk, text)
-                    if _contains_hangul(translated):
-                        last_problem = "The response still contains Korean/Hangul text."
-                    else:
-                        chunk.translation = translated
-                        merge_terms(glossary, data.get("key_terms") or [])
-                        break
-            except Exception as exc:
-                last_problem = f"The model call failed: {type(exc).__name__}: {exc}"
-
-            if verbose:
-                prefix = f"  translate_body chunk {chunk.id}: "
-                suffix = " Retrying..." if attempt == 0 else ""
-                print(f"{prefix}{last_problem}{suffix}")
-            if attempt == 0:
-                messages = build_body_retry_messages(
-                    previous_messages=messages,
-                    problem=last_problem,
-                    chunk_text=chunk.text,
-                )
-        else:
+                    chunk.translation = translated
+                    added = 0
+                    for ko, en in new_terms.items():
+                        if ko not in glossary:
+                            glossary[ko] = en
+                            added += 1
+                    if verbose and added:
+                        print(
+                            f"  translate_body chunk {chunk.id}: "
+                            f"glossary extended with {added} new term(s)"
+                        )
+        except Exception as exc:
             chunk.translation = ""
-
-        if not chunk.translation:
-            failed.append(chunk.id)
             if verbose:
                 print(
                     f"  translate_body chunk {chunk.id}: "
-                    "translation unavailable after retry"
+                    f"{type(exc).__name__}: {exc}"
                 )
+
+        if not chunk.translation:
+            failed.append(chunk.id)
 
         # Heartbeat every 10 chunks (and at the end)
         if i % 10 == 0 or i == total:

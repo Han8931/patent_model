@@ -57,12 +57,11 @@ def _strip_paragraph_id(text: str) -> tuple[str, str | None]:
 def _has_paragraph_id(text: str) -> bool:
     return bool(_PARAGRAPH_ID_RE.match(text))
 
-# Approximate per-chunk character budget. Korean output ≈ 1 char per token, so
-# ~1800 chars leaves headroom for the LLM's English answer plus its system+user
-# prompt overhead within a typical 4–8k token context window. Patent paragraphs
-# are usually 100–500 chars, so this still allows 4–18 paragraphs per chunk in
-# the common case while preventing pathological merges.
-_CHUNK_MAX_CHARS = 1800
+# Approximate per-chunk character budget. Larger chunks reduce the number of
+# LLM calls and let the model see more surrounding context within one paragraph
+# group; 5000 chars fits comfortably inside the input window of every modern
+# model while still leaving room for the English response and prompt overhead.
+_CHUNK_MAX_CHARS = 5000
 
 
 def _is_continuation(text: str) -> bool:

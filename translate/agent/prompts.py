@@ -210,6 +210,70 @@ def build_preamble_plan_messages(
 # Body — translate one chunk per call (chunk may span multiple paragraphs joined with \n)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Bulk-simple body prompt — chunk-level, minimal system message
+# ---------------------------------------------------------------------------
+# Mirrors the claims-bulk approach: one short instruction line, the glossary
+# the claim translator already seeded, and the Korean text. Plain text out
+# (no JSON), no retry, no key_terms — the claim-seeded glossary carries the
+# antecedent-basis context that earlier per-chunk prompts tried to nudge via
+# legend/respectively rules.
+
+BULK_BODY_SIMPLE_SYSTEM = (
+    "Translate the Korean patent specification into USPTO style. "
+    "Preserve every [EQUATION_N] marker verbatim and in the same relative "
+    "position. Use the established glossary for terminology — never deviate "
+    "from a term that is already in the glossary. "
+    "After the translation, add a final '===== GLOSSARY =====' banner and "
+    "list any NEW Korean→English noun-phrase pairs you used that were not "
+    "already in the glossary, one per line as 'korean → english'."
+)
+
+
+def build_body_simple_messages(
+    chunk_text: str,
+    glossary: dict[str, str],
+) -> list[dict]:
+    system = BULK_BODY_SIMPLE_SYSTEM
+    if glossary:
+        system += (
+            "\n\nGLOSSARY (Korean → English):\n"
+            + format_for_prompt(glossary)
+        )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": chunk_text},
+    ]
+
+
+def parse_body_simple_response(raw: str) -> tuple[str, dict[str, str]]:
+    """Split a body-simple response into (translation_text, new_glossary).
+
+    Tolerant: if no '===== GLOSSARY =====' banner is found, treats the entire
+    response as the translation and returns an empty glossary dict.
+    """
+    import re as _re
+    text = _strip_bulk_response_fences(raw)
+    match = _re.search(_BULK_GLOSSARY_BANNER_RE, text)
+    if not match:
+        return text.strip(), {}
+    translation = text[: match.start()].strip()
+    block = text[match.end():].strip()
+    out: dict[str, str] = {}
+    line_re = _re.compile(r"^\s*(.+?)\s*(?:→|->)\s*(.+?)\s*$")
+    for line in block.splitlines():
+        line = line.strip()
+        if not line or line.startswith("```"):
+            continue
+        m = line_re.match(line)
+        if not m:
+            continue
+        ko, en = m.group(1).strip(), m.group(2).strip()
+        if ko and en and "→" not in en and "->" not in en:
+            out[ko] = en
+    return translation, out
+
+
 def build_body_messages(
     chunk_text: str,
     glossary: dict[str, str],
