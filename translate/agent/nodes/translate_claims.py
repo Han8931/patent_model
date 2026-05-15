@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 
-from ..docx_utils import _normalize_unicode
+from ..docx_utils import _SEMICOLON_INDENT, _indent_after_colon, _normalize_unicode
 from ..prompts import build_claims_bulk_messages, parse_claims_bulk_response
 from ..state import Chunk, TranslationState
 
@@ -31,9 +31,62 @@ def _contains_hangul(text: str | None) -> bool:
     return bool(text and _HANGUL_RE.search(text))
 
 
+# --- Markdown stripping ----------------------------------------------------
+# The bulk prompt is minimal, so the model occasionally returns markdown
+# decorations that have no meaning once the text lands inside a docx <w:p>.
+_MD_BOLD_RE = re.compile(r"\*\*([^*\n]+?)\*\*")
+_MD_BOLD_UNDERSCORE_RE = re.compile(r"__([^_\n]+?)__")
+_MD_BULLET_LINE_RE = re.compile(r"^[ \t]*[-*+]\s+", flags=re.MULTILINE)
+
+
+def _strip_markdown(text: str) -> str:
+    text = _MD_BOLD_RE.sub(r"\1", text)
+    text = _MD_BOLD_UNDERSCORE_RE.sub(r"\1", text)
+    text = _MD_BULLET_LINE_RE.sub("", text)
+    return text
+
+
+# --- Claim line-break normalization ---------------------------------------
+# The bulk model sometimes returns a claim as one long line and sometimes
+# pre-breaks it. We need both paths to land at the same USPTO layout:
+#   "comprising:\n\ta foo;\n\ta bar; and\n\ta baz."
+#
+# Order matters: the '; and' joiner is matched first so the plain '; ' rule
+# cannot consume its leading semicolon. The lookaheads keep the rules from
+# re-matching whitespace that's already a '\n\t' indent (so the function is
+# idempotent — running twice produces the same output).
+_BREAK_SEMI_AND_RE = re.compile(r";[ \t]+and[ \t]+(?=\S)")
+_BREAK_SEMI_RE = re.compile(r";[ \t]+(?!and\b)(?=\S)")
+_BREAK_COLON_VERB_RE = re.compile(
+    r"\b(comprising|including|having|consisting(?:\s+(?:essentially\s+)?of)?)"
+    r"[ \t]*:[ \t]+(?=\S)",
+    re.IGNORECASE,
+)
+_INDENT_AFTER_SEMICOLON_NL_RE = re.compile(rf";[ \t]*\n(?!{_SEMICOLON_INDENT})")
+_INDENT_AFTER_SEMI_AND_NL_RE = re.compile(
+    rf";[ \t]*and[ \t]*\n(?!{_SEMICOLON_INDENT})"
+)
+
+
+def _normalize_claim_breaks(text: str) -> str:
+    # Insert breaks where missing.
+    text = _BREAK_SEMI_AND_RE.sub(f"; and\n{_SEMICOLON_INDENT}", text)
+    text = _BREAK_SEMI_RE.sub(f";\n{_SEMICOLON_INDENT}", text)
+    text = _BREAK_COLON_VERB_RE.sub(
+        lambda m: f"{m.group(1)}:\n{_SEMICOLON_INDENT}", text
+    )
+    # Normalize breaks already present.
+    text = _INDENT_AFTER_SEMI_AND_NL_RE.sub(f"; and\n{_SEMICOLON_INDENT}", text)
+    text = _INDENT_AFTER_SEMICOLON_NL_RE.sub(f";\n{_SEMICOLON_INDENT}", text)
+    return text
+
+
 def _minimal_cleanup(claim_num: int, raw_text: str) -> str:
-    """Unicode-normalize and prepend 'N. ' if the model didn't include it."""
+    """Strip markdown, normalize claim line breaks, prepend 'N. ' if missing."""
     text = _normalize_unicode(raw_text.strip())
+    text = _strip_markdown(text)
+    text = _normalize_claim_breaks(text)
+    text = _indent_after_colon(text)
     if not re.match(rf'^\s*{claim_num}\s*\.\s', text):
         text = f"{claim_num}. {text}"
     return text
