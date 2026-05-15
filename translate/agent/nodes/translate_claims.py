@@ -112,6 +112,19 @@ _BREAK_COLON_VERB_RE = re.compile(
     re.IGNORECASE,
 )
 
+# USPTO style uses ';' / '; and' separators on claim element lists, NOT
+# enumerated 'a) … b) … c) …' or '(a) … (b) …' or 'i) … ii) …' markers.
+# The model sometimes invents these when it sees a numbered Korean source.
+# Strip them after the break normalization so each element line starts with
+# its actual content (the leading '\t' indent is preserved).
+_STRIP_LETTER_LIST_RE = re.compile(
+    r"(^|\n)([ \t]*)"                  # line start + the canonical tab indent
+    r"\(?"                              # optional opening paren: 'a)' vs '(a)'
+    r"(?:[a-zA-Z]{1,3}|[ivxIVX]{1,4}|\d{1,2})"  # 'a' / 'ii' / 'IV' / '1' / '12'
+    r"\)\.?"                            # closing paren, optionally followed by '.'
+    r"[ \t]+",                          # at least one space before the content
+)
+
 
 def _normalize_claim_breaks(text: str) -> str:
     # Step 1: collapse every '; <whitespace>' shape to '; '.
@@ -123,6 +136,9 @@ def _normalize_claim_breaks(text: str) -> str:
     text = _BREAK_COLON_VERB_RE.sub(
         lambda m: f"{m.group(1)}:\n{_SEMICOLON_INDENT}", text
     )
+    # Step 3: strip enumerated list markers ('a)', '(b)', 'ii)', '1)') that
+    # the model occasionally adds at the start of each claim element line.
+    text = _STRIP_LETTER_LIST_RE.sub(r"\1\2", text)
     return text
 
 

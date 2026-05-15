@@ -126,20 +126,27 @@ def split_into_clauses(text: str) -> list[tuple[str, str]]:
 # Per-unit translation
 # ---------------------------------------------------------------------------
 
+_LLM_RETRIES = 3  # extra attempts after the first call; total = 1 + _LLM_RETRIES
+
+
 def _llm_text(client, messages: list[dict]) -> str:
-    """Run one LLM call → cleaned English text. Retries once on empty/Korean.
+    """Run one LLM call → cleaned English text. Up to ``_LLM_RETRIES`` retries
+    on empty / Korean-containing responses.
 
     The minimal segment/clause prompts occasionally return empty content
     or text that still has Korean characters in it (most often with weaker
-    models or rate-limited responses). Without retry, that Korean would
-    propagate up through ``translate_text_segment`` / ``translate_chunk_by_sentence``
-    into the docx as if it were a translation. One corrective follow-up
-    message reminding the model "English only, no Korean characters"
-    rescues most of those failures.
+    models or rate-limited responses). Each retry appends one extra user
+    message reminding the model "English only, no Korean characters".
+
+    Crucially: if every attempt comes back with Korean still present, we
+    return an empty string rather than the Korean text. Returning Korean
+    here would let it propagate up through ``translate_text_segment`` /
+    ``translate_chunk_by_sentence`` into the docx as if it were a
+    translation. Empty is a clearer failure signal for the caller.
     """
     def _call(msgs: list[dict]) -> str:
         try:
-            raw = msgs and client.complete(msgs) or ""
+            raw = client.complete(msgs)
         except Exception:
             return ""
         if raw is None:
@@ -151,12 +158,14 @@ def _llm_text(client, messages: list[dict]) -> str:
         return text or ""
 
     text = _call(messages)
-    if not text or _HANGUL_RE.search(text):
+    attempt = 0
+    history = list(messages)
+    while (not text or _HANGUL_RE.search(text)) and attempt < _LLM_RETRIES:
         problem = (
             "empty/placeholder response"
             if not text else "response still contained Korean characters"
         )
-        retry = messages + [{
+        history = history + [{
             "role": "user",
             "content": (
                 "Your previous response was unusable. "
@@ -167,7 +176,13 @@ def _llm_text(client, messages: list[dict]) -> str:
                 "Keep any [EQUATION_N] marker verbatim and in the same position."
             ),
         }]
-        text = _call(retry)
+        text = _call(history)
+        attempt += 1
+
+    # Reject any final text that still has Hangul — caller treats empty as
+    # "translation unavailable" and leaves the source paragraph untouched.
+    if text and _HANGUL_RE.search(text):
+        return ""
     return text
 
 
