@@ -38,6 +38,7 @@ from ..agent.docx_utils import (
 from ..agent.glossary import clean_translation_text, extract_json_block, merge_terms
 from .nodes.translate_claims import _strip_markdown
 from .sentence_translator import (
+    _HANGUL_RE,
     _LEGEND_HEADER_RE,
     needs_per_segment_translation,
     translate_chunk_by_sentence,
@@ -185,6 +186,18 @@ def translate_paragraph_in_place(
     if not en:
         if verbose:
             print(f"  paragraph_translator: empty/placeholder for record {record.index}")
+        return False
+
+    # ``_llm_text`` already retries once on empty/Korean responses. If we
+    # still see Hangul here, the segment/clause path couldn't translate
+    # cleanly — leave the source paragraph untouched rather than overwrite
+    # it with mixed Korean/English text that pretends to be a translation.
+    if _HANGUL_RE.search(en):
+        if verbose:
+            print(
+                f"  paragraph_translator: Korean still present after retry "
+                f"for record {record.index}; skipping write"
+            )
         return False
 
     # Reattach paragraph ID prefix at the very start.
