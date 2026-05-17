@@ -63,7 +63,7 @@ def _parse_glossary_lines(block: str) -> dict[str, str]:
 def parse_translation_with_glossary(raw: str) -> tuple[str, dict[str, str]]:
     """Split a response into (translation_text, new_glossary).
 
-    Used by every translator that requests a trailing ``===== GLOSSARY ====='`'
+    Used by every translator that requests a trailing ``===== GLOSSARY =====``
     block. Missing trailer ⇒ whole response is the translation, empty glossary.
     """
     text = _strip_fences(raw)
@@ -75,26 +75,105 @@ def parse_translation_with_glossary(raw: str) -> tuple[str, dict[str, str]]:
     return translation, _parse_glossary_lines(block)
 
 
+def parse_translation_dual_shape(raw: str) -> tuple[str, dict[str, str]]:
+    """Translator-response parser that accepts BOTH shapes models emit.
+
+    1. JSON envelope ``{"text": "<translation>", "key_terms": [{"ko":..,"en":..}, …]}``
+       — heavily JSON-trained models (gpt-oss, GPT-4o) return this even when
+       a slim prompt doesn't ask for it. ``clean_translation_text`` would
+       otherwise reject the raw JSON because its ``_JSONISH_RESPONSE_RE``
+       filter sees the leading ``{`` and treats the response as schema echo.
+    2. Plain text with an optional ``===== GLOSSARY =====`` trailer — the
+       shape the slim BODY_SYSTEM / ABSTRACT_SYSTEM prompts ask for.
+
+    Returns ``(translation_text, new_glossary)``. Empty translation when
+    neither shape yields a usable English string.
+    """
+    if not raw:
+        return "", {}
+
+    # Shape 1: JSON envelope.
+    from .glossary import clean_translation_text, extract_json_block
+    data = extract_json_block(raw) or {}
+    if isinstance(data, dict):
+        envelope_text = clean_translation_text(data.get("text"))
+        if envelope_text:
+            new_terms: dict[str, str] = {}
+            for item in data.get("key_terms") or []:
+                if isinstance(item, dict):
+                    ko = (item.get("ko") or "").strip()
+                    en = (item.get("en") or "").strip()
+                    if ko and en:
+                        new_terms.setdefault(ko, en)
+            return envelope_text, new_terms
+
+    # Shape 2: plain text + optional GLOSSARY trailer.
+    translation, new_terms = parse_translation_with_glossary(raw)
+    return clean_translation_text(translation), new_terms
+
+
 # ---------------------------------------------------------------------------
 # Body — one chunk per call.
 # ---------------------------------------------------------------------------
 
 BODY_SYSTEM = (
     "Translate this Korean patent text to English in USPTO style. "
+    "Use formal patent drafting language suitable for USPTO filing. "
     "Use the glossary below for terminology. Keep every [EQUATION_N] marker "
-    "verbatim. After the translation, list any NEW Korean→English terms "
-    "you used under a '===== GLOSSARY =====' banner."
+    "verbatim. If a 'PREVIOUSLY TRANSLATED CONTEXT' block precedes the "
+    "Korean, use it ONLY to keep antecedent references (pronouns, 'the X', "
+    "parallel structure) consistent with what came before — do NOT include "
+    "or re-translate that block in your output. "
+    "Return translated text only: no markdown, no headings, no labels such "
+    "as 'Translation', no explanations, and no conversational preface. "
+    "After the translation, list any NEW Korean→English terms you used "
+    "under a '===== GLOSSARY =====' banner."
 )
+
+
+def _trailing_context_block(trailing: list[str] | None, max_chars: int = 1200) -> str:
+    """Format already-translated chunks as a read-only context block.
+
+    The most recent translation is the closest neighbor, so it goes LAST
+    (immediately above the Korean we're about to translate). Trims old
+    entries from the front if the cumulative length exceeds ``max_chars``.
+    """
+    if not trailing:
+        return ""
+    kept: list[str] = []
+    used = 0
+    # Walk newest-first so we preserve the closest neighbor under the cap.
+    for piece in reversed(trailing):
+        piece = (piece or "").strip()
+        if not piece:
+            continue
+        if used + len(piece) > max_chars and kept:
+            break
+        kept.append(piece)
+        used += len(piece)
+    if not kept:
+        return ""
+    # Restore source order (oldest first, newest closest to the Korean text).
+    kept.reverse()
+    return (
+        "PREVIOUSLY TRANSLATED CONTEXT (for reference only — do NOT re-translate "
+        "or include in your output):\n"
+        + "\n\n".join(kept)
+        + "\n\n---\n\n"
+    )
 
 
 def build_body_messages(
     chunk_text: str,
     glossary: dict[str, str],
     equation_context: dict[str, str] | None = None,
+    *,
+    trailing_translated: list[str] | None = None,
 ) -> list[dict]:
+    user = _trailing_context_block(trailing_translated) + chunk_text
     return [
         {"role": "system", "content": BODY_SYSTEM + _glossary_block(glossary)},
-        {"role": "user", "content": chunk_text},
+        {"role": "user", "content": user},
     ]
 
 
@@ -106,8 +185,9 @@ def build_body_retry_messages(
 ) -> list[dict]:
     retry = (
         f"Previous response unusable ({problem}). "
-        "Retry: translate the Korean below to English in USPTO style. "
-        "No Korean characters in the output."
+        "Retry: translate the Korean below to formal English in USPTO style. "
+        "No Korean characters, markdown, headings, labels, explanations, or "
+        "conversational preface in the output."
     )
     return previous_messages + [{"role": "user", "content": retry}]
 
@@ -119,8 +199,10 @@ def build_body_retry_messages(
 
 SEGMENT_SYSTEM = (
     "Translate this Korean patent text fragment to English in USPTO style. "
+    "Use formal patent drafting language suitable for USPTO filing. "
     "Do not translate any [EQUATION_N] marker — the surrounding code stitches "
-    "markers in separately. Output plain text only."
+    "markers in separately. Output plain text only: no markdown, no headings, "
+    "no labels, no explanations, and no conversational preface."
 )
 
 
@@ -138,7 +220,7 @@ CLAUSE_SYSTEM = (
     "Translate this Korean parameter clause to one English clause in USPTO "
     "style: '<symbol> is <description>'. Keep the symbol VERBATIM as the "
     "first token. Plain text only — no surrounding punctuation, no 'where' / "
-    "'wherein' wrapper."
+    "'wherein' wrapper, no markdown, no label, and no explanation."
 )
 
 
@@ -159,8 +241,11 @@ def build_clause_messages(
 
 ABSTRACT_SYSTEM = (
     "Translate this Korean patent abstract to one concise English paragraph "
-    "in USPTO style. After the translation, list any NEW Korean→English "
-    "terms you used under a '===== GLOSSARY =====' banner."
+    "in formal USPTO style suitable for filing. Return the abstract text "
+    "only: no markdown, no headings, no labels such as 'Abstract' or "
+    "'Translation', no explanations, and no conversational preface. After "
+    "the translation, list any NEW Korean→English terms you used under a "
+    "'===== GLOSSARY =====' banner."
 )
 
 
@@ -179,9 +264,12 @@ _BULK_CLAIMS_DELIMITER = "===== CLAIM {n} ====="
 _BULK_CLAIMS_DELIM_RE = r"={3,}\s*CLAIM\s+(\d+)\s*={3,}"
 
 BULK_CLAIMS_SYSTEM = (
-    "Translate each Korean claim to English in USPTO style. "
+    "Translate each Korean claim to formal USPTO claim style suitable for "
+    "filing. "
     "Return each claim's English under the same '===== CLAIM N =====' banner "
     "that precedes it; keep every [EQUATION_N] marker verbatim. "
+    "Do not add markdown, headings, labels such as 'Translation', "
+    "explanations, or conversational prefaces inside any claim block. "
     "After the last claim, list the Korean→English terms you used under a "
     "'===== GLOSSARY =====' banner, one per line as 'korean → english'."
 )
@@ -279,7 +367,9 @@ def build_revision_messages(
         f"{_glossary_block(glossary)}\n\n"
         f"{paragraphs_block}\n\n"
         "Return ONLY paragraphs that need changes as a JSON array. Omit "
-        "paragraphs that are already correct.\n"
+        "paragraphs that are already correct. Revised text must be formal "
+        "USPTO-style English with no markdown, headings, labels, explanations, "
+        "or conversational preface.\n"
         'Format: [{"index": 0, "text": "<revised English text>"}, ...]'
     )
     return [

@@ -186,6 +186,19 @@ def translate_paragraph_in_place(
             print(f"  paragraph_translator: empty/placeholder for record {record.index}")
         return False
 
+    # Zero-tolerance: ``_llm_text`` already retried once on Korean. If a
+    # Hangul character is still in the assembled segment text, this
+    # paragraph isn't fit for output — leave the source XML untouched so
+    # the strict write-time guard surfaces it.
+    from .sentence_translator import _has_hangul
+    if _has_hangul(en):
+        if verbose:
+            print(
+                f"  paragraph_translator: Hangul still present after retry "
+                f"for record {record.index}; skipping write"
+            )
+        return False
+
     # Reattach paragraph ID prefix at the very start.
     if id_prefix and not en.lstrip().startswith(id_prefix):
         en = f"{id_prefix} {en.lstrip()}"
@@ -220,7 +233,9 @@ def translate_chunk_per_paragraph(
     """Translate every paragraph in ``chunk.paragraph_indices`` independently.
 
     Returns the number of paragraphs actually translated (LLM calls made).
-    Marks the chunk as ``applied_in_place=True`` so the write node skips it.
+    Marks the chunk as ``applied_in_place=True`` only when at least one
+    paragraph was actually written, so a false route or total LLM failure
+    cannot silently skip the chunk.
     """
     applied = 0
     for idx in chunk.paragraph_indices:
@@ -241,11 +256,15 @@ def translate_chunk_per_paragraph(
         )
         if ok:
             applied += 1
-    chunk.applied_in_place = True
-    # Stamp a translation marker so legacy logic that checks chunk.translation
-    # can tell the chunk was handled. Empty string would trigger Korean-fallback
-    # behavior in some callers, so use a sentinel non-empty value.
-    chunk.translation = "[APPLIED_IN_PLACE]"
+    if applied:
+        chunk.applied_in_place = True
+        # Stamp a translation marker so legacy logic that checks chunk.translation
+        # can tell the chunk was handled. Empty string would trigger Korean-fallback
+        # behavior in some callers, so use a sentinel non-empty value.
+        chunk.translation = "[APPLIED_IN_PLACE]"
+    else:
+        chunk.applied_in_place = False
+        chunk.translation = ""
     return applied
 
 

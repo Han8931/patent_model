@@ -20,6 +20,7 @@ from __future__ import annotations
 import re
 
 from ..docx_utils import _SEMICOLON_INDENT, _indent_after_colon, _normalize_unicode
+from ..glossary import clean_translation_text
 from ..prompts import (
     build_claims_bulk_messages,
     parse_claims_bulk_glossary,
@@ -112,7 +113,10 @@ def _normalize_claim_breaks(text: str) -> str:
 
 def _minimal_cleanup(claim_num: int, raw_text: str) -> str:
     """Strip markdown, normalize claim line breaks, normalize 'N. ' prefix."""
-    text = _normalize_unicode(raw_text.strip())
+    cleaned = clean_translation_text(raw_text)
+    if not cleaned:
+        return ""
+    text = _normalize_unicode(cleaned)
     text = _strip_markdown(text)
     text = _normalize_claim_breaks(text)
     text = _indent_after_colon(text)
@@ -259,7 +263,7 @@ def translate_claims(state: TranslationState) -> dict:
             )
 
     for chunk in valid:
-        text = by_num.get(chunk.claim_num, "")
+        text = clean_translation_text(by_num.get(chunk.claim_num, ""))
         if not text or _contains_hangul(text):
             chunk.translation = ""
             continue

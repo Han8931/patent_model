@@ -46,9 +46,15 @@ _OPAQUE_MARKER_RE = re.compile(
     r"(?P<eq>\[EQUATION(?:_\d+)?\])|(?P<pid>\[\d{1,5}\])"
 )
 
-# Korean legend headers: '여기서,', '상기 수학식 N에서,', '다만,', …
+# Korean parameter-legend headers. Keep this intentionally narrow: ordinary
+# prose often contains phrases like "상기 구조체에서" ("in the structure"),
+# which must not be treated as an equation legend.
 _LEGEND_HEADER_RE = re.compile(
-    r"(?:여기서|상기\s+[^,，。\n]{1,30}에서|다만)[,，]?\s*",
+    r"(?:"
+    r"여기서|다만|"
+    r"(?:상기\s+)?(?:(?:수학식|관계식|공식|방정식|등식|부등식)"
+    r"\s*[^,，。\n]{0,20}|식\s*(?:\d+|[A-Za-z]|\([^)]+\))?)에서"
+    r")[,，]?\s*",
     re.UNICODE,
 )
 
@@ -124,32 +130,64 @@ def split_into_clauses(text: str) -> list[tuple[str, str]]:
 # Per-unit translation
 # ---------------------------------------------------------------------------
 
+_HANGUL_RE = re.compile(r"[가-힯]")
+
+
+def _has_hangul(text: str) -> bool:
+    return bool(text and _HANGUL_RE.search(text))
+
+
 def _llm_text(client, messages: list[dict]) -> str:
-    """Run one LLM call and return cleaned plain text, or '' on failure.
+    """Run one LLM call → cleaned English text. Retries once on empty / Korean.
 
-    Tries three response shapes in order:
-      1. JSON ``{"text": ...}`` (old prompts that asked for JSON output).
-      2. Plain text with a trailing ``===== GLOSSARY =====`` banner (the
-         slim SEGMENT/CLAUSE prompts don't ask for the trailer but some
-         models — Gemma, Qwen — add one anyway). Strip the trailer.
-      3. Plain text only (the common case for the slim prompts).
+    Tries three response shapes:
+      1. JSON ``{"text": ...}`` envelope.
+      2. Plain text with a trailing ``===== GLOSSARY =====`` banner.
+      3. Plain text only.
+
+    If the cleaned result is empty OR still contains Hangul, send ONE
+    corrective follow-up message ("English only — no Korean characters")
+    and re-parse. If that retry also still has Hangul, return "" so the
+    caller treats this segment as a translation failure rather than
+    propagating Korean into the output.
     """
-    try:
-        raw = client.complete(messages)
-    except Exception:
-        return ""
+    def _attempt(msgs: list[dict]) -> str:
+        try:
+            raw = client.complete(msgs)
+        except Exception:
+            return ""
+        # Shape 1: JSON envelope.
+        data = extract_json_block(raw) or {}
+        text = clean_translation_text(data.get("text"))
+        if text:
+            return text
+        # Shapes 2 + 3: plain text, possibly with a GLOSSARY trailer.
+        from .prompts import parse_translation_with_glossary
+        translation, _new_terms = parse_translation_with_glossary(raw)
+        return clean_translation_text(translation)
 
-    # Shape 1: JSON envelope.
-    data = extract_json_block(raw) or {}
-    text = clean_translation_text(data.get("text"))
-    if text:
+    text = _attempt(messages)
+    if text and not _has_hangul(text):
         return text
 
-    # Shapes 2 + 3: plain text, possibly with a GLOSSARY trailer.
-    # Delay-import to avoid an agent ↔ agent.nodes import cycle.
-    from .prompts import parse_translation_with_glossary
-    translation, _new_terms = parse_translation_with_glossary(raw)
-    return clean_translation_text(translation)
+    # Retry once with a corrective follow-up. The pipeline is impeccable-
+    # quality: any Korean leftover triggers a retry, and if the retry still
+    # has Korean we return "" so upstream code can mark the chunk failed.
+    problem = "empty/placeholder response" if not text else "response still contained Korean characters"
+    retry_msgs = messages + [{
+        "role": "user",
+        "content": (
+            "Your previous response was unusable. "
+            f"Problem: {problem}. "
+            "Translate the Korean above to English in USPTO style. "
+            "Output English only — NO Korean characters anywhere, no markdown, "
+            "no commentary. Keep any [EQUATION_N] marker verbatim."
+        ),
+    }]
+    text = _attempt(retry_msgs)
+    if text and _has_hangul(text):
+        return ""
+    return text
 
 
 def translate_text_segment(

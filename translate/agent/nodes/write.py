@@ -605,6 +605,21 @@ def _korean_char_ratio(doc) -> float:
     return hangul / letters if letters else 0.0
 
 
+def _find_hangul_paragraphs(doc) -> list[tuple[int, str]]:
+    """Return ``[(paragraph_index, first 200 chars), …]`` for every paragraph
+    containing any Hangul character. Empty list = output is impeccable.
+
+    Used by the strict write-time guard: zero-tolerance for Korean in the
+    final output means even one paragraph with Hangul aborts the save.
+    """
+    out: list[tuple[int, str]] = []
+    for idx, p in enumerate(iter_all_paragraphs(doc)):
+        text = p.text or ""
+        if any("가" <= ch <= "힣" for ch in text):
+            out.append((idx, text[:200].replace("\n", " ⏎ ")))
+    return out
+
+
 def write(state: TranslationState) -> dict:
     doc = state["doc"]
     records = state["records"]
@@ -664,17 +679,28 @@ def write(state: TranslationState) -> dict:
         except Exception as exc:
             progress(f"  WARNING: abstract word-count footer failed: {type(exc).__name__}: {exc}")
 
-    # Sanity check: refuse to save an output that is overwhelmingly Korean.
-    # That signals every chunk's LLM call returned untranslated text (rate
-    # limit, auth error, network), or the entire write loop bailed out.
-    # Char-based ratio so static English section headers can't mask a
-    # catastrophic translation failure.
-    ratio = _korean_char_ratio(doc)
-    if ratio > 0.40:
+    # Zero-tolerance guard: every paragraph must be English in USPTO style.
+    # If even one paragraph still contains a Hangul character, abort the
+    # save so the user can rerun (likely with a stronger model, more
+    # max_tokens, or a fresh attempt at the failed chunks).
+    hangul_paragraphs = _find_hangul_paragraphs(doc)
+    if hangul_paragraphs:
+        details = "\n".join(
+            f"    paragraph {idx}: {snippet}"
+            for idx, snippet in hangul_paragraphs[:20]
+        )
+        more = (
+            f"\n    ... and {len(hangul_paragraphs) - 20} more"
+            if len(hangul_paragraphs) > 20 else ""
+        )
+        ratio = _korean_char_ratio(doc)
         raise RuntimeError(
-            f"Translation appears to have failed: {ratio:.0%} of the document's letters are still Hangul. "
-            f"Refusing to save {output_path} so you don't end up with a fake-translated file. "
-            "Check the LLM connection (LLM_API_KEY, LLM_BASE_URL) and rerun."
+            f"Refusing to save {output_path}: {len(hangul_paragraphs)} "
+            f"paragraph(s) still contain Korean text ({ratio:.2%} Hangul). "
+            "Every paragraph must be in English in USPTO style.\n"
+            f"Affected paragraphs (up to 20 shown):\n{details}{more}\n"
+            "Rerun, or retry the failed chunks. Check the .log file for "
+            "per-chunk failure reasons."
         )
 
     # Equation integrity report. Compares the OMML XML signatures captured at

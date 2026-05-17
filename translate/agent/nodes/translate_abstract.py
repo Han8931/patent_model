@@ -11,8 +11,7 @@ from __future__ import annotations
 import re
 
 from ..docx_utils import postprocess
-from ..glossary import clean_translation_text
-from ..prompts import build_abstract_messages, parse_translation_with_glossary
+from ..prompts import build_abstract_messages, parse_translation_dual_shape
 from ..state import TranslationState
 
 
@@ -38,8 +37,7 @@ def translate_abstract(state: TranslationState) -> dict:
     chunk.translation = ""
     try:
         raw = client.complete(build_abstract_messages(chunk.text, glossary))
-        translation_text, new_terms = parse_translation_with_glossary(raw)
-        text = clean_translation_text(translation_text)
+        text, new_terms = parse_translation_dual_shape(raw)
         if text and not _contains_hangul(text):
             chunk.translation = postprocess(text)
             for ko, en in new_terms.items():
