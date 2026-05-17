@@ -125,16 +125,31 @@ def split_into_clauses(text: str) -> list[tuple[str, str]]:
 # ---------------------------------------------------------------------------
 
 def _llm_text(client, messages: list[dict]) -> str:
-    """Run one LLM call and return cleaned plain text, or '' on failure."""
+    """Run one LLM call and return cleaned plain text, or '' on failure.
+
+    Tries three response shapes in order:
+      1. JSON ``{"text": ...}`` (old prompts that asked for JSON output).
+      2. Plain text with a trailing ``===== GLOSSARY =====`` banner (the
+         slim SEGMENT/CLAUSE prompts don't ask for the trailer but some
+         models — Gemma, Qwen — add one anyway). Strip the trailer.
+      3. Plain text only (the common case for the slim prompts).
+    """
     try:
         raw = client.complete(messages)
     except Exception:
         return ""
+
+    # Shape 1: JSON envelope.
     data = extract_json_block(raw) or {}
     text = clean_translation_text(data.get("text"))
     if text:
         return text
-    return clean_translation_text(raw)
+
+    # Shapes 2 + 3: plain text, possibly with a GLOSSARY trailer.
+    # Delay-import to avoid an agent ↔ agent.nodes import cycle.
+    from .prompts import parse_translation_with_glossary
+    translation, _new_terms = parse_translation_with_glossary(raw)
+    return clean_translation_text(translation)
 
 
 def translate_text_segment(

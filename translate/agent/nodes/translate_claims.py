@@ -185,8 +185,17 @@ def translate_claims(state: TranslationState) -> dict:
     pairs = [(c.claim_num, c.text) for c in valid]
     messages = build_claims_bulk_messages(pairs)
 
+    # Budget for the bulk call: 1500 tokens per claim is a generous estimate
+    # (typical claims are 300–600 tokens of English plus the glossary trailer).
+    # Cap at 32k so we don't ask for absurd budgets on huge claim sets — if
+    # the model still truncates at 32k we'll fall through to the per-claim
+    # retry loop below.
+    bulk_max_tokens = max(client.config.max_tokens, min(total * 1500, 32_000))
+
     try:
-        raw = client.complete(messages)
+        raw, finish_reason = client.complete(
+            messages, max_tokens=bulk_max_tokens, return_meta=True,
+        )
     except Exception as exc:
         raise RuntimeError(
             f"Bulk claim translation call failed: {type(exc).__name__}: {exc}"
@@ -194,11 +203,54 @@ def translate_claims(state: TranslationState) -> dict:
 
     by_num = parse_claims_bulk_response(raw)
     claims_glossary = parse_claims_bulk_glossary(raw)
-    if verbose:
-        missing = [c.claim_num for c in valid if c.claim_num not in by_num]
-        if missing:
+
+    # Detect truncation: either the API reported finish_reason='length', OR
+    # the parsed response is missing some claim numbers we asked for, OR a
+    # parsed claim ends mid-sentence (no terminator). Retry just those.
+    def _looks_truncated(t: str) -> bool:
+        if not t:
+            return False
+        return not t.rstrip().endswith((".", ":", ";", '"', "?", "!"))
+
+    missing_or_truncated = [
+        c for c in valid
+        if c.claim_num not in by_num or _looks_truncated(by_num.get(c.claim_num, ""))
+    ]
+    truncated_by_length = finish_reason == "length"
+
+    if missing_or_truncated or truncated_by_length:
+        if verbose:
+            nums = [c.claim_num for c in missing_or_truncated]
             print(
-                f"  translate_claims: bulk response missing claim(s): {missing}"
+                f"  translate_claims: bulk response truncated "
+                f"(finish_reason={finish_reason!r}, "
+                f"missing/cut claims={nums}); retrying just those..."
+            )
+        # Retry only the failing claims in a fresh bulk call with the full
+        # 32k budget — that should be enough for any individual claim.
+        retry_pairs = [(c.claim_num, c.text) for c in missing_or_truncated]
+        if retry_pairs:
+            try:
+                retry_raw = client.complete(
+                    build_claims_bulk_messages(retry_pairs), max_tokens=32_000,
+                )
+                retry_by_num = parse_claims_bulk_response(retry_raw)
+                retry_gloss = parse_claims_bulk_glossary(retry_raw)
+                by_num.update(retry_by_num)
+                for ko, en in retry_gloss.items():
+                    claims_glossary.setdefault(ko, en)
+            except Exception as exc:
+                if verbose:
+                    print(
+                        f"  translate_claims: retry call failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+
+    if verbose:
+        still_missing = [c.claim_num for c in valid if c.claim_num not in by_num]
+        if still_missing:
+            print(
+                f"  translate_claims: still missing claim(s) after retry: {still_missing}"
             )
         if claims_glossary:
             print(

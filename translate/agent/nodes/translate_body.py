@@ -6,12 +6,13 @@ import re
 import time
 
 from ..docx_utils import postprocess
-from ..glossary import clean_translation_text, extract_json_block, merge_terms
+from ..glossary import clean_translation_text
 from ..prompts import (
     build_body_messages,
     build_body_retry_messages,
     build_clause_messages,
     build_segment_messages,
+    parse_translation_with_glossary,
 )
 from ..paragraph_translator import (
     chunk_needs_per_paragraph,
@@ -31,14 +32,18 @@ def _contains_hangul(text: str | None) -> bool:
     return bool(text and _HANGUL_RE.search(text))
 
 
-def _extract_body_text(raw: str) -> tuple[str, dict]:
-    data = extract_json_block(raw) or {}
-    text = clean_translation_text(data.get("text"))
-    if not text:
-        # Some models return plain text instead of JSON. This is acceptable,
-        # including paragraph-ID-prefixed text such as "[001] The ...".
-        text = clean_translation_text(raw)
-    return text, data
+def _extract_body_text(raw: str) -> tuple[str, dict[str, str]]:
+    """Parse the body LLM response into (English_text, new_glossary_terms).
+
+    The slim BODY_SYSTEM prompt asks the model to return plain text followed
+    by an optional ``===== GLOSSARY =====`` trailer of new Korean→English
+    pairs. This helper splits the response, runs ``clean_translation_text``
+    on the translation half, and returns the parsed glossary so the caller
+    can extend ``state.glossary``.
+    """
+    translation, new_terms = parse_translation_with_glossary(raw or "")
+    text = clean_translation_text(translation)
+    return text, new_terms
 
 
 def _apply_paragraph_id_prefix(chunk: Chunk, text: str) -> str:
@@ -79,13 +84,25 @@ def translate_body(state: TranslationState) -> dict:
     progress(f"Translating BODY ({total} chunks)…")
     failed: list[str] = []
     for i, chunk in enumerate(chunks, 1):
+        # Decide which path this chunk takes BEFORE the LLM call so the
+        # progress line tells the user what kind of work is in flight.
+        if chunk_needs_per_paragraph(chunk, indexed_records):
+            path = "per-paragraph"
+        elif needs_per_segment_translation(chunk.text):
+            path = "sentence-level"
+        else:
+            path = "chunk"
+        n_chars = len(chunk.text)
+        progress(f"  BODY {i:>3}/{total}  start  path={path:14s} chars={n_chars}")
+        t0 = time.monotonic()
+
         # Equation-bearing chunks (any paragraph in the chunk has inline math
         # or is a standalone <m:oMath> paragraph) take the per-paragraph
         # in-place path: each source paragraph is translated independently and
         # written back into its own <w:p>, with <m:oMath> elements left
         # untouched at their source XML position. The write node skips these
         # chunks because chunk.applied_in_place is set.
-        if chunk_needs_per_paragraph(chunk, indexed_records):
+        if path == "per-paragraph":
             try:
                 applied = translate_chunk_per_paragraph(
                     chunk,
@@ -98,20 +115,16 @@ def translate_body(state: TranslationState) -> dict:
                     verbose=verbose,
                 )
             except Exception as exc:
-                if verbose:
-                    print(
-                        f"  translate_body chunk {chunk.id} (per-paragraph): "
-                        f"{type(exc).__name__}: {exc}"
-                    )
+                progress(
+                    f"  BODY {i:>3}/{total}  FAIL   {type(exc).__name__}: {exc}"
+                )
                 failed.append(chunk.id)
             else:
-                if verbose:
-                    print(
-                        f"  translate_body chunk {chunk.id}: "
-                        f"per-paragraph applied to {applied} paragraph(s)"
-                    )
-            if i % 10 == 0 or i == total:
-                progress(f"  BODY {i}/{total}")
+                dt = time.monotonic() - t0
+                progress(
+                    f"  BODY {i:>3}/{total}  done   {dt:6.1f}s  "
+                    f"applied={applied} paragraph(s)"
+                )
             if delay > 0:
                 time.sleep(delay)
             continue
@@ -122,7 +135,7 @@ def translate_body(state: TranslationState) -> dict:
         # markers never go through a single combined translation, so they
         # can't drift out of position or get glued together at the start.
         # Pure-prose chunks keep the cheaper single call.
-        if needs_per_segment_translation(chunk.text):
+        if path == "sentence-level":
             try:
                 en = translate_chunk_by_sentence(
                     chunk.text,
@@ -133,19 +146,19 @@ def translate_body(state: TranslationState) -> dict:
                 )
             except Exception as exc:
                 en = None
-                if verbose:
-                    print(
-                        f"  translate_body chunk {chunk.id} (sentence-level): "
-                        f"{type(exc).__name__}: {exc}"
-                    )
+                progress(
+                    f"  BODY {i:>3}/{total}  FAIL   {type(exc).__name__}: {exc}"
+                )
             if en:
                 chunk.translation = _apply_paragraph_id_prefix(chunk, en)
             else:
                 chunk.translation = ""
+            dt = time.monotonic() - t0
             if not chunk.translation:
                 failed.append(chunk.id)
-            if i % 10 == 0 or i == total:
-                progress(f"  BODY {i}/{total}")
+                progress(f"  BODY {i:>3}/{total}  empty  {dt:6.1f}s")
+            else:
+                progress(f"  BODY {i:>3}/{total}  done   {dt:6.1f}s")
             if delay > 0:
                 time.sleep(delay)
             continue
@@ -159,7 +172,7 @@ def translate_body(state: TranslationState) -> dict:
         for attempt in range(2):
             try:
                 raw = client.complete(messages)
-                text, data = _extract_body_text(raw)
+                text, new_terms = _extract_body_text(raw)
                 if not text:
                     last_problem = "The response did not contain usable English text."
                 else:
@@ -168,7 +181,11 @@ def translate_body(state: TranslationState) -> dict:
                         last_problem = "The response still contains Korean/Hangul text."
                     else:
                         chunk.translation = translated
-                        merge_terms(glossary, data.get("key_terms") or [])
+                        # Extend glossary with any new ko→en pairs the model
+                        # produced in the '===== GLOSSARY =====' trailer.
+                        # setdefault preserves earlier (claim-derived) terms.
+                        for ko, en in new_terms.items():
+                            glossary.setdefault(ko, en)
                         break
             except Exception as exc:
                 last_problem = f"The model call failed: {type(exc).__name__}: {exc}"
@@ -186,17 +203,12 @@ def translate_body(state: TranslationState) -> dict:
         else:
             chunk.translation = ""
 
+        dt = time.monotonic() - t0
         if not chunk.translation:
             failed.append(chunk.id)
-            if verbose:
-                print(
-                    f"  translate_body chunk {chunk.id}: "
-                    "translation unavailable after retry"
-                )
-
-        # Heartbeat every 10 chunks (and at the end)
-        if i % 10 == 0 or i == total:
-            progress(f"  BODY {i}/{total}")
+            progress(f"  BODY {i:>3}/{total}  empty  {dt:6.1f}s (after retry)")
+        else:
+            progress(f"  BODY {i:>3}/{total}  done   {dt:6.1f}s")
 
         if delay > 0:
             time.sleep(delay)
