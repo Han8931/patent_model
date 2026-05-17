@@ -183,7 +183,26 @@ def main() -> None:
         for inp in input_files
     ]
 
-    print(f"Batch: {len(jobs)} file(s), {WORKERS} worker(s)\n")
+    try:
+        from translate.agent.nodes.chunk_body import _CHUNK_MAX_CHARS
+        chunk_chars = _CHUNK_MAX_CHARS
+    except Exception:
+        chunk_chars = "?"
+
+    print("=" * 60)
+    print(f"  files            : {len(jobs)}")
+    print(f"  workers          : {min(WORKERS, len(jobs))}")
+    print(f"  output_dir       : {args.output_dir}")
+    print(f"  model            : {CONFIG.model}")
+    print(f"  base_url         : {CONFIG.base_url}")
+    print(f"  temperature      : {CONFIG.temperature}")
+    print(f"  max_tokens       : {CONFIG.max_tokens}")
+    print(f"  body chunk chars : {chunk_chars}")
+    print(f"  batch_size       : {BATCH_SIZE}")
+    print(f"  font             : {FONT}")
+    print(f"  review           : {REVIEW}")
+    print("=" * 60)
+    print()
 
     with mp.Pool(processes=min(WORKERS, len(jobs))) as pool:
         results = pool.map(_translate_file, jobs)

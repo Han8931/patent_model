@@ -85,6 +85,27 @@ def resolve_output(input_path: Path, output_arg: Path | None) -> Path:
     return output_arg
 
 
+def _print_config(config: ClientConfig, args: argparse.Namespace, output: Path) -> None:
+    """Print a brief config summary so a user can confirm the run setup."""
+    try:
+        from translate.agent.nodes.chunk_body import _CHUNK_MAX_CHARS
+        chunk_chars = _CHUNK_MAX_CHARS
+    except Exception:
+        chunk_chars = "?"
+    print("=" * 60)
+    print(f"  input            : {args.input}")
+    print(f"  output           : {output}")
+    print(f"  model            : {config.model}")
+    print(f"  base_url         : {config.base_url}")
+    print(f"  temperature      : {config.temperature}")
+    print(f"  max_tokens       : {config.max_tokens}")
+    print(f"  body chunk chars : {chunk_chars}")
+    print(f"  batch_size       : {args.batch_size}")
+    print(f"  font             : {args.font}")
+    print(f"  review           : {not args.no_review}")
+    print("=" * 60)
+
+
 def main() -> None:
     args = parse_args()
 
@@ -97,6 +118,9 @@ def main() -> None:
     )
 
     output = resolve_output(args.input, args.output)
+
+    if not args.quiet:
+        _print_config(config, args, output)
 
     translator = PatentTranslator(config, batch_size=args.batch_size)
     try:
