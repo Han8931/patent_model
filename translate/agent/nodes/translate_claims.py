@@ -18,6 +18,7 @@ tested against the model's raw drafting behavior.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from ..docx_utils import _SEMICOLON_INDENT, _indent_after_colon, _normalize_unicode
 from ..prompts import (
@@ -150,19 +151,67 @@ _LEADING_CLAIM_PREFIX_RE = re.compile(
 )
 
 
+def _snippet(text: str, width: int = 80) -> str:
+    """One-line snippet for log/error output."""
+    flat = (text or "").replace("\n", " ⏎ ").replace("\t", " ⇥ ")
+    if len(flat) <= width:
+        return flat
+    return flat[: width - 1] + "…"
+
+
+def _hangul_count(text: str) -> int:
+    return sum(1 for c in (text or "") if _HANGUL_RE.fullmatch(c))
+
+
 def _assert_claims_translated(chunks: list[Chunk]) -> None:
-    failed = [
-        str(c.claim_num)
-        for c in chunks
-        if c.claim_num is not None
-        and (not c.translation or _contains_hangul(c.translation))
-    ]
+    """Hard guard used by the review node after applying revisions.
+
+    Lists each failing claim with a reason (MISSING vs HANGUL leftover) so
+    the user sees what went wrong even when the failure happens during
+    review rather than initial translation.
+    """
+    failed: list[tuple[int, str]] = []
+    for c in chunks:
+        if c.claim_num is None:
+            continue
+        if not c.translation:
+            failed.append((c.claim_num, "MISSING translation"))
+        elif _contains_hangul(c.translation):
+            n_ko = _hangul_count(c.translation)
+            failed.append((c.claim_num, f"HANGUL leftover ({n_ko} chars)"))
     if failed:
+        details = "\n".join(f"  claim {num}: {reason}" for num, reason in failed)
         raise RuntimeError(
-            "Claim translation failed for claim(s): "
-            + ", ".join(failed)
-            + ". Refusing to write a partially Korean claims section."
+            "Claim translation failed for "
+            f"{len(failed)} claim(s). "
+            "Refusing to write a partially Korean claims section.\n"
+            f"{details}"
         )
+
+
+def _dump_bulk_artifacts(
+    output_path: Path | None,
+    request_user_msg: str,
+    raw_response: str,
+) -> tuple[Path | None, Path | None]:
+    """Write the bulk request/response next to the docx output for post-mortem.
+
+    Returns ``(req_path, resp_path)`` or ``(None, None)`` if writing failed.
+    Logging must never become the reason a translation fails, so OSError is
+    swallowed.
+    """
+    if output_path is None:
+        return None, None
+    stem = output_path.with_suffix("")
+    req_path = Path(f"{stem}.claims_bulk.req.txt")
+    resp_path = Path(f"{stem}.claims_bulk.resp.txt")
+    try:
+        req_path.parent.mkdir(parents=True, exist_ok=True)
+        req_path.write_text(request_user_msg, encoding="utf-8")
+        resp_path.write_text(raw_response, encoding="utf-8")
+        return req_path, resp_path
+    except OSError:
+        return None, None
 
 
 def translate_claims(state: TranslationState) -> dict:
@@ -174,6 +223,7 @@ def translate_claims(state: TranslationState) -> dict:
     progress = state.get("progress") or (lambda _: None)
     verbose = state.get("verbose", False)
     glossary = dict(state.get("glossary", {}))
+    output_path = state.get("output_path")
 
     valid = [c for c in chunks if c.claim_num is not None]
     total = len(valid)
@@ -184,39 +234,97 @@ def translate_claims(state: TranslationState) -> dict:
 
     pairs = [(c.claim_num, c.text) for c in valid]
     messages = build_claims_bulk_messages(pairs)
+    request_user_msg = next(
+        (m["content"] for m in messages if m.get("role") == "user"), ""
+    )
 
     try:
         raw = client.complete(messages)
     except Exception as exc:
+        # Dump the request so the user can see what we tried to send even
+        # when the API call itself errored before any response came back.
+        req_path, _ = _dump_bulk_artifacts(output_path, request_user_msg, "")
+        suffix = f" (request dumped to {req_path})" if req_path else ""
         raise RuntimeError(
-            f"Bulk claim translation call failed: {type(exc).__name__}: {exc}"
+            f"Bulk claim translation call failed: {type(exc).__name__}: {exc}{suffix}"
         ) from exc
 
     by_num = parse_claims_bulk_response(raw)
     claims_glossary = parse_claims_bulk_glossary(raw)
-    if verbose:
-        missing = [c.claim_num for c in valid if c.claim_num not in by_num]
-        if missing:
-            print(
-                f"  translate_claims: bulk response missing claim(s): {missing}"
-            )
-        if claims_glossary:
-            print(
-                f"  translate_claims: seeded glossary with {len(claims_glossary)} "
-                "term(s) from claim translations"
-            )
 
+    # Always-on bulk summary — surfaces truncation/banner-drift without
+    # needing --verbose. Goes through `progress` so it also lands in the log.
+    expected = {c.claim_num for c in valid}
+    parsed = set(by_num.keys())
+    missing_nums = sorted(expected - parsed)
+    extra_nums = sorted(parsed - expected)
+    progress(
+        f"  claims bulk: {total} sent · {len(parsed)} banners parsed · "
+        f"{len(claims_glossary)} glossary terms · raw={len(raw)} chars"
+    )
+    if missing_nums:
+        progress(f"  claims bulk: MISSING banner for claim(s): {missing_nums}")
+    if extra_nums:
+        progress(f"  claims bulk: UNEXPECTED claim banner(s) in response: {extra_nums}")
+
+    # Per-claim status — verbose only.
+    failed: list[tuple[int, str, str]] = []  # (claim_num, reason, snippet)
     for chunk in valid:
-        text = by_num.get(chunk.claim_num, "")
-        if not text or _contains_hangul(text):
+        num = chunk.claim_num
+        text = by_num.get(num, "")
+        if not text:
             chunk.translation = ""
+            failed.append((num, "MISSING banner", ""))
+            if verbose:
+                print(f"  claim {num:>3}: MISSING banner in bulk response")
             continue
-        chunk.translation = _minimal_cleanup(chunk.claim_num, text)
+        n_ko = _hangul_count(text)
+        if n_ko:
+            chunk.translation = ""
+            failed.append((num, f"HANGUL leftover ({n_ko} chars)", _snippet(text)))
+            if verbose:
+                print(
+                    f"  claim {num:>3}: HANGUL leftover "
+                    f"({n_ko}/{len(text)} chars) — '{_snippet(text, 60)}'"
+                )
+            continue
+        cleaned = _minimal_cleanup(num, text)
+        chunk.translation = cleaned
+        if verbose:
+            print(f"  claim {num:>3}: OK ({len(cleaned)} chars)")
+
+    if verbose and claims_glossary:
+        print(
+            f"  translate_claims: seeded glossary with {len(claims_glossary)} "
+            "term(s) from claim translations"
+        )
 
     # Claim-derived terms SEED the glossary. The body translator extends it
     # later for description-only terms that claims don't name.
     for ko, en in claims_glossary.items():
         glossary.setdefault(ko, en)
 
-    _assert_claims_translated(valid)
+    if failed:
+        req_path, resp_path = _dump_bulk_artifacts(
+            output_path, request_user_msg, raw
+        )
+        details = "\n".join(
+            f"  claim {num}: {reason}"
+            + (f" — '{snip}'" if snip else "")
+            for num, reason, snip in failed
+        )
+        artifact_lines = []
+        if req_path:
+            artifact_lines.append(f"  request : {req_path}")
+        if resp_path:
+            artifact_lines.append(f"  response: {resp_path}")
+        artifact_block = (
+            "\nArtifacts:\n" + "\n".join(artifact_lines) if artifact_lines else ""
+        )
+        raise RuntimeError(
+            f"Claim translation failed for {len(failed)} claim(s) "
+            f"of {total}. Refusing to write a partially Korean claims section.\n"
+            f"{details}{artifact_block}"
+        )
+
     return {"chunks_claims": chunks, "glossary": glossary}
