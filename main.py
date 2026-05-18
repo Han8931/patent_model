@@ -18,9 +18,14 @@ import sys
 from pathlib import Path
 
 from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 
 from translate.client import ClientConfig, LLMClient
+
+
+OUTPUT_FONT = "Times New Roman"
 
 
 # ---------------------------------------------------------------------------
@@ -403,29 +408,69 @@ def translate_paragraph(client: LLMClient, korean: str, glossary: dict[str, str]
 # DOCX write-back
 # ---------------------------------------------------------------------------
 
+def _set_run_font(run, name: str = OUTPUT_FONT) -> None:
+    """Force *run* to use *name* across every Word font slot.
+
+    Word picks a font based on character script: ``ascii`` for Latin, ``hAnsi``
+    for high-ANSI, ``eastAsia`` for CJK, ``cs`` for complex scripts. Setting
+    only ``run.font.name`` leaves CJK characters rendering in the source's
+    Korean font, so any untranslated text would stick out. We set all four.
+    """
+    run.font.name = name
+    rPr = run._element.get_or_add_rPr()
+    rFonts = rPr.find(qn("w:rFonts"))
+    if rFonts is None:
+        rFonts = OxmlElement("w:rFonts")
+        rPr.insert(0, rFonts)
+    for slot in ("w:ascii", "w:hAnsi", "w:eastAsia", "w:cs"):
+        rFonts.set(qn(slot), name)
+
+
 def set_paragraph_text(p: Paragraph, new_text: str) -> None:
-    """Replace a paragraph's text in place; embedded "\\n" become soft breaks."""
+    """Replace a paragraph's text in place; embedded "\\n" become soft breaks.
+
+    Every run we write (existing or new) is forced to ``OUTPUT_FONT``. Soft
+    breaks are attached to the previous line's run so multi-line claims
+    render correctly instead of bunching every break at the top.
+    """
     lines = (new_text or "").split("\n")
 
-    if not p.runs:
-        run = p.add_run(lines[0])
-        for line in lines[1:]:
-            run.add_break()
-            p.add_run(line)
-        return
+    if p.runs:
+        last = p.runs[0]
+        last.text = lines[0]
+        _set_run_font(last)
+        for r in p.runs[1:]:
+            r.text = ""
+    else:
+        last = p.add_run(lines[0])
+        _set_run_font(last)
 
-    first = p.runs[0]
-    first.text = lines[0]
-    for r in p.runs[1:]:
-        r.text = ""
     for line in lines[1:]:
-        first.add_break()
-        p.add_run(line)
+        last.add_break()
+        last = p.add_run(line)
+        _set_run_font(last)
 
 
 def clear_paragraph(p: Paragraph) -> None:
     for r in p.runs:
         r.text = ""
+
+
+def _apply_output_font(doc) -> None:
+    """Sweep every run in body paragraphs and tables, forcing ``OUTPUT_FONT``.
+
+    Catches anything ``set_paragraph_text`` didn't touch: untouched section
+    headers, untranslated claim anchors left in Korean, table contents, etc.
+    """
+    for p in doc.paragraphs:
+        for run in p.runs:
+            _set_run_font(run)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    for run in p.runs:
+                        _set_run_font(run)
 
 
 # ---------------------------------------------------------------------------
@@ -549,9 +594,11 @@ def main() -> None:
     # ----- 3) description, paragraph-by-paragraph -----
     desc_records = [r for r in records if r["role"] == "description" and r["text"].strip()]
     print(f"[3/3] Translating description ({len(desc_records)} paragraphs)…")
+    total = len(desc_records)
     for n, r in enumerate(desc_records, 1):
         r["translation"] = translate_paragraph(client, r["text"], glossary)
-        print(f"      {n}/{len(desc_records)}")
+        if n % 10 == 0 or n == total:
+            print(f"      {n}/{total}")
 
     # ----- write back -----
     apply_section_headers(doc, records)
@@ -559,6 +606,8 @@ def main() -> None:
     apply_abstract(doc, records, abstract_en)
     for r in desc_records:
         set_paragraph_text(doc.paragraphs[r["index"]], r.get("translation", ""))
+
+    _apply_output_font(doc)
 
     doc.save(out_path)
     print(f"wrote {out_path}")
