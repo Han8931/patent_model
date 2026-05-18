@@ -109,6 +109,16 @@ def _print_config(config: ClientConfig, args: argparse.Namespace, output: Path) 
 def main() -> None:
     args = parse_args()
 
+    # Detect whether the user explicitly overrode --max-tokens. We compare
+    # against the env-derived default that the parser used. If they match
+    # AND the model is a reasoning model, bump to 32 768 so chain-of-thought
+    # doesn't consume the entire budget and starve the answer.
+    from translate.client import is_reasoning_model
+    env_defaults = ClientConfig.from_env()
+    cli_overrode_max = args.max_tokens != env_defaults.max_tokens
+    if not cli_overrode_max and is_reasoning_model(args.model) and args.max_tokens < 16_384:
+        args.max_tokens = 32_768
+
     config = ClientConfig(
         model=args.model,
         base_url=args.base_url,

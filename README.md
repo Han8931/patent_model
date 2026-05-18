@@ -6,7 +6,7 @@ Korean → English patent application translator. Reads cleaned Korean `.docx` f
 
 - Python 3.13+
 - [uv](https://github.com/astral-sh/uv)
-- [Ollama](https://ollama.com) (or any OpenAI-compatible API)
+- [Ollama](https://ollama.com) (or any OpenAI-compatible API: OpenAI, vLLM, llama.cpp, …)
 
 ## Setup
 
@@ -14,10 +14,11 @@ Korean → English patent application translator. Reads cleaned Korean `.docx` f
 # Install dependencies
 uv sync
 
-# Pull the model (Ollama)
-ollama pull gpt-oss:120b          # MXFP4 quantized (~60 GB)
-ollama pull gpt-oss:120b-q8_0     # Q8 (~120 GB, recommended for Mac Studio 256 GB)
-ollama pull gpt-oss:120b-fp16     # Full precision (~240 GB)
+# Pull a model (Ollama)
+ollama pull gpt-oss:120b          # 60 GB, MXFP4 quantized
+ollama pull qwen3.5:122b          # 81 GB, reasoning model
+ollama pull gemma4:31b            # 19 GB, non-reasoning, fast
+ollama pull qwen2.5:32b           # 19 GB, non-reasoning, very fast
 
 # Copy and fill in credentials
 cp .env.example .env
@@ -26,17 +27,25 @@ cp .env.example .env
 ## Project Structure
 
 ```
-main.py           — Single-file CLI
-batch.py          — Batch translation with multiprocessing + S3 support
-download.py       — Download .docx files from S3 to a local directory
-preprocess.py     — Strip paragraph numbering ([0016]) from raw docx files
+main.py             — Single-file CLI
+batch.py            — Multi-file translation with multiprocessing + S3 support
+download.py         — Download .docx files from S3
+preprocess.py       — Strip paragraph numbering ([0016]) from raw docx files
+inspect_docx.py     — Terminal viewer for output docx (flags Korean / equations / images)
+compare_models.py   — Run the same source through multiple models and compare timing + Korean ratio
 translate/
-  client.py       — OpenAI-compatible LLM client (works with Ollama, OpenAI, etc.)
-  prompt.py       — Section-specific prompts + review-phase prompts
-  translator.py   — Core translation engine
-  s3.py           — S3 file listing and download helpers
-data/             — Input documents (git-ignored)
-output/           — Translated documents (git-ignored)
+  client.py         — OpenAI-compatible LLM client (Ollama, OpenAI, vLLM, …)
+  translator.py     — Core translation engine
+  s3.py             — S3 file listing and download helpers
+  agent/
+    prompts.py      — All prompt builders (4 system prompts, all one sentence)
+    pipeline.py     — Sequential pipeline (load → claims → body → abstract → write)
+    nodes/          — Per-section node implementations
+docs/
+  PROMPTS.md        — How prompts flow through the pipeline
+  PIPELINE.md       — High-level pipeline diagram
+data/               — Input documents (git-ignored)
+output/             — Translated documents + .log audit files (git-ignored)
 ```
 
 ## Preprocessing
@@ -59,7 +68,7 @@ uv run python download.py
 uv run python download.py --bucket my-bucket --prefix patents/2024/ --dir data/batch3
 ```
 
-Configure S3 credentials in `.env`:
+S3 credentials live in `.env`:
 
 ```ini
 AWS_ACCESS_KEY_ID=AKIA...
@@ -77,33 +86,65 @@ Already-downloaded files are skipped on re-runs.
 
 ```bash
 # Default: Ollama on localhost, output to output/
-uv run python main.py data/published1_kr_clean.docx
+uv run python main.py data/sample.docx
 
 # Explicit output path
-uv run python main.py data/published1_kr_clean.docx output/result.docx
+uv run python main.py data/sample.docx output/result.docx
 
 # OpenAI
-uv run python main.py data/published1_kr_clean.docx \
+uv run python main.py data/sample.docx \
   --base-url https://api.openai.com/v1 \
   --api-key sk-... \
   --model gpt-4o
+```
+
+At startup the run prints a config banner so you can confirm what's about to run:
+
+```
+============================================================
+  input            : data/sample.docx
+  output           : output/sample_en.docx
+  model            : gpt-oss:120b
+  base_url         : http://localhost:11434/v1
+  temperature      : 0.2
+  max_tokens       : 4096
+  body chunk chars : 1800
+  batch_size       : 30
+  font             : Times New Roman
+  review           : True
+============================================================
 ```
 
 ### Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--model` | `gpt-oss:120b` | Model name |
+| `--model` | `gpt-oss:120b` | Model name (e.g. `qwen3.5:122b`, `gemma4:31b`, `gpt-4o`) |
 | `--base-url` | `http://localhost:11434/v1` | API base URL |
 | `--api-key` | `ollama` | API key |
 | `--temperature` | `0.2` | Sampling temperature |
-| `--max-tokens` | `4096` | Max tokens per response |
-| `--context-window` | `3` | Preceding paragraphs passed as rolling context |
-| `--lookahead` | `2` | Upcoming paragraphs included as read-only context |
+| `--max-tokens` | `4096` | Max tokens per response (bump to 32 768 for reasoning models like qwen3.5) |
+| `--batch-size` | `30` | Max paragraphs per review batch |
 | `--font` | `Times New Roman` | Output font |
-| `--delay` | `0.5` | Seconds between API calls |
+| `--delay` | `0.0` | Seconds between API calls |
 | `--no-review` | — | Skip the post-translation review pass |
 | `--quiet` | — | Suppress progress output |
+| `--log` | `<output>.log` | Per-document audit log path |
+
+### Switching models
+
+Use any model your Ollama (or OpenAI-compatible endpoint) can serve:
+
+```bash
+# .env (persistent across runs)
+LLM_MODEL=qwen3.5:122b
+LLM_MAX_TOKENS=32768          # reasoning models burn tokens on chain-of-thought
+LLM_CHUNK_CHARS=1800          # body chunk char cap
+LLM_CONTEXT_BACK=2            # trailing-context window (chunks)
+
+# Or one-shot override on the CLI
+uv run main.py sample.docx --model qwen3.5:122b --max-tokens 32768
+```
 
 ## Batch Mode
 
@@ -132,44 +173,134 @@ Files are downloaded to `S3_DOWNLOAD_DIR` before translation. Already-downloaded
 ### Batch configuration
 
 ```python
-WORKERS = 2          # files processed in parallel
-CONTEXT_WINDOW = 3   # rolling backward context (paragraph pairs)
-LOOKAHEAD_WINDOW = 2 # read-only forward context (raw paragraphs)
+WORKERS = 4          # files processed in parallel (separate worker processes)
+BATCH_SIZE = 10      # max paragraphs per review batch
 REVIEW = True        # post-translation review pass per section
 FONT = "Times New Roman"
-DELAY = 0.5          # seconds between API calls within one file
+DELAY = 0.0          # seconds between API calls within one file
 ```
 
-With a local Ollama model, `WORKERS > 1` does not reduce wall-clock time for a single model. Increase it when using an API provider that supports concurrent requests.
+With a local Ollama model, `WORKERS > 1` does not reduce wall-clock time per file — Ollama serializes inside the model. Increase `WORKERS` when using an API provider that supports concurrent requests.
+
+## Inspecting output
+
+After a run, audit the output docx from the terminal:
+
+```bash
+# Per-paragraph view with KO / EQ / IMG / HDR flags
+uv run inspect_docx.py output/sample_en.docx
+
+# Summary only (totals + Korean character ratio)
+uv run inspect_docx.py output/sample_en.docx --summary
+
+# Just the paragraphs that still contain Korean (zero on a clean run)
+uv run inspect_docx.py output/sample_en.docx --korean-only
+```
+
+## Comparing models
+
+Run the same source through multiple models in sequence and get a summary table of timing + Korean leak ratio:
+
+```bash
+uv run compare_models.py data/sample.docx \
+    --models qwen3.5:122b gemma4:31b gpt-oss:120b
+```
+
+Output:
+
+```
+==============================================================================
+  COMPARISON SUMMARY
+==============================================================================
+  model                 status        wall   paras  KO_paras    KO_%
+  qwen3.5:122b          ok          1342.0s     91         0   0.00%
+  gemma4:31b            ok           220.0s     91         2   0.04%
+  gpt-oss:120b          ok           485.0s     91         0   0.00%
+==============================================================================
+```
+
+Each run also writes its own output file: `output/sample_<model>.docx`.
 
 ## Translation Pipeline
 
-Each document goes through two passes:
+Each document flows through a sequential pipeline (claims first so claim terminology seeds the body):
 
-### 1. Translation pass
+```
+load → classify → apply_static
+     → chunk_claims → translate_claims → review_claims
+     → chunk_body   → translate_body   → review_body
+     → chunk_abstract → translate_abstract → review_abstract
+     → write
+```
 
-Paragraphs are translated one at a time using section-specific prompts:
+See `docs/PIPELINE.md` for the diagram and `docs/PROMPTS.md` for how the prompts attach.
 
-- **Section routing** — body, abstract, and claims each use a dedicated prompt tuned for USPTO style.
-- **Rolling context** — the last `--context-window` translated paragraph pairs are injected as conversation history to maintain terminology consistency.
-- **Lookahead context** — the next `--lookahead` raw paragraphs are appended to each prompt as read-only context, helping with multi-part constructs like enumerated lists and multi-clause claims.
-- **Claim formatting** — `【청구항 N】` markers are replaced with `N.`; the claim body is translated without a number prefix.
-- **Abstract word count** — inserted as `(N)` immediately after the abstract.
-- **Images and equations** — preserved from the source document; only text runs are translated.
-- **Line breaks** — sentences break at `.` and `;` boundaries using `<w:br/>` elements so breaks render correctly in Word.
-- **Unicode normalisation** — non-breaking hyphens, curly quotes, and special spaces are converted to ASCII equivalents to avoid rendering issues in Times New Roman.
+### Slim prompts
 
-### 2. Review pass (per section)
+Every translation system prompt is **one sentence** mentioning "USPTO style":
 
-After each section is fully translated, a two-step review runs:
+| Prompt | Used by | Approximate size |
+|---|---|---|
+| `BODY_SYSTEM`     | body chunks                          | 246 chars |
+| `SEGMENT_SYSTEM`  | equation-fragment translation        | 189 chars |
+| `CLAUSE_SYSTEM`   | parameter legend clauses             | 228 chars |
+| `ABSTRACT_SYSTEM` | abstract                             | 191 chars |
+| `BULK_CLAIMS_SYSTEM` | claims (single bulk call)         | 321 chars |
+| `_REVIEW_SYSTEM`  | review decide + revise               | 261 chars |
 
-1. **Decision node** — sends the full set of Korean/English paragraph pairs to the LLM. Returns `{ "needs_revision": bool, "issues": [...] }`. If no issues are found, the section is kept as-is (no extra API call).
-2. **Revision** — if issues were found, a second call receives the pairs plus the issue list and returns only the paragraphs that need changes. Revisions are applied back to the document in place.
+The USPTO drafting rules (bracket policy, FIG. casing, antecedent basis, "comprising" discipline, parameter-legend layout, reference numerals) are enforced by **deterministic postprocess sweeps in code**, not by long prompts. Switching models doesn't require re-tuning the prompt — the code keeps the USPTO layout shape regardless.
 
-The review checks for:
-- Terminology drift (same Korean term translated differently across paragraphs)
-- Translation omissions or hallucinations
-- Claim structure (`A ... comprising:` / `The ... of claim N, wherein`)
-- Figure reference format (`FIG. N`)
+### Glossary handoff
+
+Claims run first. The bulk-claims response includes a `===== GLOSSARY =====` block of Korean→English noun-phrase pairs; those seed `state["glossary"]` as canonical (claim terms never get overwritten later). Body and abstract chunks read that glossary in every prompt and can extend it with new terms via the same trailer convention. `setdefault` semantics throughout.
+
+### Trailing context (body only)
+
+Each body chunk's prompt gets the last `LLM_CONTEXT_BACK` already-translated chunks prepended as a read-only context block. Helps with antecedent references ("the layer", "the device"), pronoun resolution, and parallel structure across paragraphs. Default: 2 chunks. Set `LLM_CONTEXT_BACK=0` to disable.
+
+Claims (single bulk call) don't need this — the model sees every claim at once.
+
+### Zero-tolerance Korean guard
+
+Every translator path runs `_contains_hangul(text)` on each chunk's result and re-tries once with a corrective follow-up message if Korean is detected. At write time a strict guard scans every paragraph in the final docx; if **any** paragraph still contains Hangul, the write is **aborted with `RuntimeError`** listing the offending paragraphs. The output file is only saved when every paragraph is English.
+
+To diagnose a failed run:
+
+```bash
+# Why did chunks fail?  (DIAG lines show raw LLM responses for failed chunks)
+grep -E "DIAG|FAIL|empty|KOREAN" output/sample_en.log
+```
+
+### Review pass (per section)
+
+After each section is translated, a two-step review runs:
+
+1. **Decision** — sends Korean/English pairs + glossary to the LLM. Returns `{ "needs_revision": bool, "issues": [...] }`. Every flagged issue is printed/logged.
+2. **Revision** — if issues exist, a second call returns only the paragraphs that need changes. Each applied revision is logged as a `[REVISION ...]` block with BEFORE/AFTER text so you can audit:
+
+```
+[REVISION claims chunk-claim-7 (claim 7)]
+  ISSUE 1: Claim 7 'first semiconductor die comprises a second substrate' is confusing
+  BEFORE: 7. A semiconductor package, comprising: a first die comprising a second substrate; ...
+  AFTER : 7. A semiconductor package, comprising: a first die comprising a first substrate; ...
+```
+
+After a run, audit revisions:
+
+```bash
+grep -A 4 "REVISION" output/sample_en.log
+```
 
 Disable with `--no-review` (CLI) or `REVIEW = False` (batch).
+
+## Logs
+
+Every run writes `output/<stem>.log` next to the docx, containing:
+
+- Startup config (model, max_tokens, chunk size, …).
+- Per-chunk progress (heartbeat every 10 chunks; failures always).
+- `DIAG:` lines for any chunk that failed both attempts (raw LLM response preview).
+- `[REVIEW <section>] Issue: …` for every quality issue the reviewer raised.
+- `[REVISION <section> chunk-N] BEFORE/AFTER` blocks for every applied revision.
+- `WARNING: BODY translation unavailable for chunk(s): …` if any chunks failed.
+- The final RuntimeError + paragraph list if the strict guard aborted the save.

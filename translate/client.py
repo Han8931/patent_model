@@ -19,15 +19,46 @@ class ClientConfig:
 
     @classmethod
     def from_env(cls) -> "ClientConfig":
-        """Load LLM connection settings from environment / .env file."""
+        """Load LLM connection settings from environment / .env file.
+
+        Auto-bumps ``max_tokens`` to a reasoning-friendly default when the
+        chosen model is a known thinking model (qwen3*, deepseek-r1, o1, o3,
+        qwq) AND the user has not set ``LLM_MAX_TOKENS`` themselves. Without
+        this, the default 4096 gets entirely consumed by the model's
+        chain-of-thought reasoning, the answer comes back empty, and every
+        chunk fails identically — the exact 62/63 failure mode we saw with
+        qwen3.5:122b runs.
+        """
         load_dotenv()
+        model = os.getenv("LLM_MODEL", cls.model)
+        env_max_tokens = os.getenv("LLM_MAX_TOKENS")
+        if env_max_tokens is None and is_reasoning_model(model):
+            resolved_max_tokens = 32_768
+        else:
+            resolved_max_tokens = (
+                int(env_max_tokens) if env_max_tokens else cls.max_tokens
+            )
         return cls(
-            model       = os.getenv("LLM_MODEL",       cls.model),
+            model       = model,
             base_url    = os.getenv("LLM_BASE_URL",    cls.base_url),
             api_key     = os.getenv("LLM_API_KEY",     cls.api_key),
             temperature = float(os.getenv("LLM_TEMPERATURE", cls.temperature)),
-            max_tokens  = int(os.getenv("LLM_MAX_TOKENS",    cls.max_tokens)),
+            max_tokens  = resolved_max_tokens,
         )
+
+
+_REASONING_MODEL_HINTS = ("qwen3", "deepseek-r1", "r1-", "o1", "o3", "qwq")
+
+
+def is_reasoning_model(model: str) -> bool:
+    """Heuristic: model name suggests visible chain-of-thought reasoning.
+
+    Used to auto-bump ``max_tokens`` so the answer isn't starved by the
+    reasoning budget. Conservative — only flips True for names we know need
+    the higher budget. Non-reasoning models keep the existing 4096 default.
+    """
+    m = (model or "").lower()
+    return any(hint in m for hint in _REASONING_MODEL_HINTS)
 
 
 class LLMClient:
