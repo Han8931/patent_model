@@ -13,9 +13,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import re
 import sys
 from pathlib import Path
+from typing import Callable
 
 from docx import Document
 from docx.oxml import OxmlElement
@@ -26,6 +28,8 @@ from translate.client import ClientConfig, LLMClient
 
 
 OUTPUT_FONT = "Times New Roman"
+
+Progress = Callable[[str], None]
 
 
 # ---------------------------------------------------------------------------
@@ -334,6 +338,9 @@ def translate_claims(
     client: LLMClient,
     korean_block: str,
     records: list[dict],
+    *,
+    progress: Progress = print,
+    logger: logging.Logger | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Returns (claim_num → English claim text, glossary).
 
@@ -360,30 +367,46 @@ def translate_claims(
 
     missing = [n for n in expected if not claims.get(n, "").strip()]
     if missing:
-        print(f"      bulk pass missed {len(missing)} claim(s) {missing}; retrying individually…")
+        progress(f"      bulk pass missed {len(missing)} claim(s) {missing}; retrying individually…")
+        if logger:
+            logger.warning(f"bulk claims pass missed {len(missing)} claim(s): {missing}")
         prior = _format_claims_block(claims, [n for n in expected if n not in missing])
         for n in missing:
             kr = korean_by_num.get(n)
             if not kr:
                 continue
-            claims[n] = _retranslate_single_claim(client, n, kr, prior, glossary)
+            try:
+                claims[n] = _retranslate_single_claim(client, n, kr, prior, glossary)
+            except Exception as e:
+                progress(f"      retry of claim {n} failed: {e!r}")
+                if logger:
+                    logger.exception(f"retry of claim {n} failed")
+                continue
             # extend prior context so each retry sees the previous retries too
             prior = (prior + "\n\n" + claims[n]).strip()
 
     # --- 3) review pass ------------------------------------------------------
     english_block = _format_claims_block(claims, expected)
     if english_block:
-        print("      running review pass…")
-        revised = _review_claims(client, korean_block, english_block, glossary)
+        progress("      running review pass…")
+        try:
+            revised = _review_claims(client, korean_block, english_block, glossary)
+        except Exception as e:
+            progress(f"      review failed — skipping: {e!r}")
+            if logger:
+                logger.exception("review pass failed")
+            revised = {}
         applied = 0
         for n, text in revised.items():
             if n in expected and text.strip() and text.strip() != claims.get(n, "").strip():
                 claims[n] = text
                 applied += 1
         if applied:
-            print(f"      review revised {applied} claim(s)")
+            progress(f"      review revised {applied} claim(s)")
+            if logger:
+                logger.info(f"review revised {applied} claim(s)")
         else:
-            print("      review found no changes")
+            progress("      review found no changes")
 
     return claims, glossary
 
@@ -477,7 +500,7 @@ def _apply_output_font(doc) -> None:
 # Apply translations
 # ---------------------------------------------------------------------------
 
-def apply_claims(doc, records: list[dict], claims: dict[str, str]) -> None:
+def apply_claims(doc, records: list[dict], claims: dict[str, str], *, progress: Progress = print) -> None:
     """Place each English claim onto the paragraph that held its 【청구항 N】 header.
 
     Other paragraphs in the CLAIMS section are cleared so the original Korean
@@ -525,8 +548,8 @@ def apply_claims(doc, records: list[dict], claims: dict[str, str]) -> None:
         clear_paragraph(doc.paragraphs[r["index"]])
 
     if untranslated:
-        print(f"      WARNING: {len(untranslated)} claim(s) without translation "
-              f"({untranslated}); Korean left in place")
+        progress(f"      WARNING: {len(untranslated)} claim(s) without translation "
+                 f"({untranslated}); Korean left in place")
 
 
 def apply_abstract(doc, records: list[dict], english: str) -> None:
@@ -552,65 +575,150 @@ def apply_section_headers(doc, records: list[dict]) -> None:
 # CLI
 # ---------------------------------------------------------------------------
 
+def _setup_logger(in_path: Path, log_path: Path) -> logging.Logger:
+    """Per-file logger that writes to *log_path* and is independent of other calls.
+
+    We instantiate ``Logger`` directly (instead of ``getLogger``) so concurrent
+    translations in batch mode don't share handlers via the global registry.
+    """
+    logger = logging.Logger(f"translate.{in_path.stem}")
+    logger.setLevel(logging.DEBUG)
+    handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S")
+    )
+    logger.addHandler(handler)
+    return logger
+
+
+def _teardown_logger(logger: logging.Logger) -> None:
+    for h in list(logger.handlers):
+        logger.removeHandler(h)
+        h.close()
+
+
+def resolve_output_path(in_path: Path, output: Path | None, suffix: str) -> Path:
+    """Decide where to write the English .docx given the CLI args.
+
+    Default: ``output/<stem>_en.docx``. If *suffix* is non-empty it's appended
+    to the stem (so ``--suffix _v1`` → ``output/<stem>_en_v1.docx``). Suffix
+    is also applied when *output* is given, so explicit names track versions
+    the same way.
+    """
+    out_path = output if output else Path("output") / f"{in_path.stem}_en.docx"
+    if suffix:
+        out_path = out_path.with_stem(out_path.stem + suffix)
+    return out_path
+
+
+def translate_file(in_path: Path, out_path: Path, *, progress: Progress = print) -> None:
+    """Translate one .docx end-to-end. Used by both the CLI and ``batch.py``.
+
+    Errors are logged to ``<out_path>.log`` (overwriting per run). Failures in
+    a single description paragraph leave the Korean text in place rather than
+    aborting the whole file; the same is true for total claims or abstract
+    failures — they're logged and the pipeline continues.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path = out_path.with_suffix(".log")
+    logger = _setup_logger(in_path, log_path)
+    logger.info(f"translate {in_path} -> {out_path}")
+
+    try:
+        client = LLMClient(ClientConfig.from_env())
+        doc = Document(in_path)
+        records = scan_paragraphs(doc)
+
+        # ----- 1) claims (single LLM call, all claims at once) -----
+        claims_block = collect_block(records, "claim")
+        claims_en: dict[str, str] = {}
+        glossary: dict[str, str] = {}
+        if claims_block:
+            n_paras = sum(1 for r in records if r["role"] == "claim")
+            progress(f"[1/3] Translating claims ({n_paras} paragraphs, single LLM call)…")
+            try:
+                claims_en, glossary = translate_claims(
+                    client, claims_block, records, progress=progress, logger=logger
+                )
+                progress(f"      got {len(claims_en)} claim(s); glossary={len(glossary)} entries")
+                logger.info(f"claims translated: {len(claims_en)}; glossary entries: {len(glossary)}")
+            except Exception as e:
+                progress(f"      ERROR: claims translation failed — {e!r}")
+                logger.exception("claims translation failed entirely")
+        else:
+            progress("[1/3] No claims section found — skipping.")
+            logger.info("no claims section")
+
+        # ----- 2) abstract -----
+        abstract_block = collect_block(records, "abstract")
+        abstract_en = ""
+        if abstract_block:
+            progress("[2/3] Translating abstract…")
+            try:
+                abstract_en = translate_abstract(client, abstract_block, glossary)
+            except Exception as e:
+                progress(f"      ERROR: abstract translation failed — {e!r}")
+                logger.exception("abstract translation failed")
+        else:
+            progress("[2/3] No abstract section found — skipping.")
+            logger.info("no abstract section")
+
+        # ----- 3) description, paragraph-by-paragraph -----
+        desc_records = [r for r in records if r["role"] == "description" and r["text"].strip()]
+        progress(f"[3/3] Translating description ({len(desc_records)} paragraphs)…")
+        total = len(desc_records)
+        failures = 0
+        for n, r in enumerate(desc_records, 1):
+            try:
+                r["translation"] = translate_paragraph(client, r["text"], glossary)
+            except Exception as e:
+                failures += 1
+                snippet = r["text"][:160].replace("\n", " ")
+                logger.error(
+                    f"description paragraph idx={r['index']} failed: {e!r}; korean='{snippet}…'"
+                )
+            if n % 10 == 0 or n == total:
+                progress(f"      {n}/{total}")
+        if failures:
+            progress(f"      WARNING: {failures} paragraph(s) failed; Korean left in place (see {log_path.name})")
+            logger.warning(f"{failures} description paragraph(s) failed to translate")
+
+        # ----- write back -----
+        apply_section_headers(doc, records)
+        apply_claims(doc, records, claims_en, progress=progress)
+        apply_abstract(doc, records, abstract_en)
+        for r in desc_records:
+            translation = r.get("translation")
+            if translation:
+                set_paragraph_text(doc.paragraphs[r["index"]], translation)
+            # else: paragraph failed — Korean stays so reviewer sees it
+
+        _apply_output_font(doc)
+
+        doc.save(out_path)
+        progress(f"wrote {out_path}")
+        logger.info(f"wrote {out_path}")
+    except Exception:
+        logger.exception("translate_file failed")
+        raise
+    finally:
+        _teardown_logger(logger)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Translate a Korean patent .docx to English.")
     parser.add_argument("path", type=Path, help="Input .docx file")
     parser.add_argument("output", type=Path, nargs="?", default=None,
                         help="Output .docx (default: output/<stem>_en.docx)")
+    parser.add_argument("--suffix", default="",
+                        help="Suffix inserted before .docx (e.g. --suffix _v1 → ..._en_v1.docx)")
     args = parser.parse_args()
 
-    in_path: Path = args.path
-    if not in_path.is_file():
-        sys.exit(f"input not found: {in_path}")
+    if not args.path.is_file():
+        sys.exit(f"input not found: {args.path}")
 
-    out_path: Path = args.output or Path("output") / f"{in_path.stem}_en.docx"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    client = LLMClient(ClientConfig.from_env())
-
-    doc = Document(in_path)
-    records = scan_paragraphs(doc)
-
-    # ----- 1) claims (single LLM call, all claims at once) -----
-    claims_block = collect_block(records, "claim")
-    if claims_block:
-        n_paras = sum(1 for r in records if r["role"] == "claim")
-        print(f"[1/3] Translating claims ({n_paras} paragraphs, single LLM call)…")
-        claims_en, glossary = translate_claims(client, claims_block, records)
-        print(f"      got {len(claims_en)} claim(s); glossary={len(glossary)} entries")
-    else:
-        print("[1/3] No claims section found — skipping.")
-        claims_en, glossary = {}, {}
-
-    # ----- 2) abstract -----
-    abstract_block = collect_block(records, "abstract")
-    if abstract_block:
-        print("[2/3] Translating abstract…")
-        abstract_en = translate_abstract(client, abstract_block, glossary)
-    else:
-        print("[2/3] No abstract section found — skipping.")
-        abstract_en = ""
-
-    # ----- 3) description, paragraph-by-paragraph -----
-    desc_records = [r for r in records if r["role"] == "description" and r["text"].strip()]
-    print(f"[3/3] Translating description ({len(desc_records)} paragraphs)…")
-    total = len(desc_records)
-    for n, r in enumerate(desc_records, 1):
-        r["translation"] = translate_paragraph(client, r["text"], glossary)
-        if n % 10 == 0 or n == total:
-            print(f"      {n}/{total}")
-
-    # ----- write back -----
-    apply_section_headers(doc, records)
-    apply_claims(doc, records, claims_en)
-    apply_abstract(doc, records, abstract_en)
-    for r in desc_records:
-        set_paragraph_text(doc.paragraphs[r["index"]], r.get("translation", ""))
-
-    _apply_output_font(doc)
-
-    doc.save(out_path)
-    print(f"wrote {out_path}")
+    out_path = resolve_output_path(args.path, args.output, args.suffix)
+    translate_file(args.path, out_path)
 
 
 if __name__ == "__main__":
