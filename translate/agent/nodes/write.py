@@ -681,8 +681,9 @@ def write(state: TranslationState) -> dict:
 
     # Zero-tolerance guard: every paragraph must be English in USPTO style.
     # If even one paragraph still contains a Hangul character, abort the
-    # save so the user can rerun (likely with a stronger model, more
-    # max_tokens, or a fresh attempt at the failed chunks).
+    # save of the canonical output but ALSO save a ``.partial.docx``
+    # alongside so ``retry_failed.py`` can re-translate just the Korean
+    # paragraphs without re-running the whole document.
     hangul_paragraphs = _find_hangul_paragraphs(doc)
     if hangul_paragraphs:
         details = "\n".join(
@@ -694,13 +695,31 @@ def write(state: TranslationState) -> dict:
             if len(hangul_paragraphs) > 20 else ""
         )
         ratio = _korean_char_ratio(doc)
+
+        # Preserve the partial output for retry. Sibling file with the same
+        # stem so the user (and retry_failed.py) can find it next to the
+        # missing canonical .docx.
+        from pathlib import Path as _Path
+        partial_path = _Path(output_path).with_suffix(".partial.docx")
+        try:
+            doc.save(str(partial_path))
+            partial_note = (
+                f"Partial output saved to {partial_path} — "
+                f"re-translate just the Korean paragraphs with:\n"
+                f"  uv run retry_failed.py {state['input_path']} {partial_path}"
+            )
+        except Exception as exc:
+            partial_note = (
+                f"Could not save partial output for retry: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
         raise RuntimeError(
             f"Refusing to save {output_path}: {len(hangul_paragraphs)} "
             f"paragraph(s) still contain Korean text ({ratio:.2%} Hangul). "
             "Every paragraph must be in English in USPTO style.\n"
             f"Affected paragraphs (up to 20 shown):\n{details}{more}\n"
-            "Rerun, or retry the failed chunks. Check the .log file for "
-            "per-chunk failure reasons."
+            f"{partial_note}"
         )
 
     # Equation integrity report. Compares the OMML XML signatures captured at

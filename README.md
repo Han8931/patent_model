@@ -33,6 +33,7 @@ download.py         — Download .docx files from S3
 preprocess.py       — Strip paragraph numbering ([0016]) from raw docx files
 inspect_docx.py     — Terminal viewer for output docx (flags Korean / equations / images)
 compare_models.py   — Run the same source through multiple models and compare timing + Korean ratio
+retry_failed.py     — Re-translate just the Korean paragraphs from a <output>.partial.docx snapshot
 translate/
   client.py         — OpenAI-compatible LLM client (Ollama, OpenAI, vLLM, …)
   translator.py     — Core translation engine
@@ -264,11 +265,30 @@ Claims (single bulk call) don't need this — the model sees every claim at once
 
 Every translator path runs `_contains_hangul(text)` on each chunk's result and re-tries once with a corrective follow-up message if Korean is detected. At write time a strict guard scans every paragraph in the final docx; if **any** paragraph still contains Hangul, the write is **aborted with `RuntimeError`** listing the offending paragraphs. The output file is only saved when every paragraph is English.
 
+When the guard aborts, the in-memory document is still written to a sibling `<output>.partial.docx` snapshot so the failed paragraphs can be retried without re-translating the whole document.
+
 To diagnose a failed run:
 
 ```bash
 # Why did chunks fail?  (DIAG lines show raw LLM responses for failed chunks)
 grep -E "DIAG|FAIL|empty|KOREAN" output/sample_en.log
+```
+
+### Retrying just the failed chunks
+
+After a failed run that left `output/sample_en.partial.docx` behind, re-translate **only** the paragraphs that still contain Korean (typically a tiny fraction of the document) and finalize the output:
+
+```bash
+uv run retry_failed.py output/sample_en.partial.docx
+```
+
+The script walks the partial, finds every Hangul-containing paragraph, sends each through the same body prompt used during the original run, and writes the translation back in place. If every paragraph clears, it saves the final `output/sample_en.docx` and removes the partial. If some paragraphs are still Korean, it re-saves the partial (now containing fewer failures) so you can retry with a stronger model or higher `--max-tokens`.
+
+```bash
+# Same flags as main.py: --model, --base-url, --max-tokens, --temperature, --font, --delay
+uv run retry_failed.py output/sample_en.partial.docx --model qwen3.5:122b --max-tokens 32768
+uv run retry_failed.py output/sample_en.partial.docx --output output/sample_final.docx
+uv run retry_failed.py output/sample_en.partial.docx --keep-partial   # keep the partial even after success
 ```
 
 ### Review pass (per section)
