@@ -38,12 +38,12 @@ class LLMClient:
             api_key=config.api_key,
         )
 
-    def complete(self, messages: list[dict]) -> str:
+    def complete(self, messages: list[dict], *, max_tokens: int | None = None) -> str:
         response = self._client.chat.completions.create(
             model=self.config.model,
             messages=messages,
             temperature=self.config.temperature,
-            max_tokens=self.config.max_tokens,
+            max_tokens=max_tokens if max_tokens is not None else self.config.max_tokens,
             **self.config.extra_params,
         )
         return response.choices[0].message.content

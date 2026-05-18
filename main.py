@@ -13,7 +13,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import sys
 from pathlib import Path
@@ -134,18 +133,53 @@ Style rules:
 - Keep terminology consistent across all claims.
 - Preserve numerical labels such as "FIG. 1" or "100a".
 
-Return STRICT JSON with this exact shape and nothing else:
-{
-  "claims": {
-    "1": "1. <full English text of claim 1>",
-    "2": "2. <full English text of claim 2>",
-    ...
-  },
-  "glossary": {"<Korean term>": "<English term>", ...}
-}
+Output format — plain text with a sentinel, no JSON, no markdown fences:
 
-The glossary should list every domain-specific noun, component, or method that
-appears in the claims so the description translator can stay consistent."""
+1. <full English text of claim 1>
+
+2. <full English text of claim 2>
+
+...
+
+---GLOSSARY---
+<Korean term> -> <English term>
+<Korean term> -> <English term>
+...
+
+Rules for the output:
+- Start each claim on its own line beginning with "N. " at column 1.
+- Separate claims with one blank line.
+- Put every Korean→English term pair below the "---GLOSSARY---" sentinel, one per line.
+- Include every domain-specific noun, component, or method in the glossary so the
+  description translator can stay consistent.
+- Output nothing before the first claim and nothing after the last glossary entry."""
+
+
+CLAIM_RETRY_PROMPT = """You are a Korean→English patent translator. Translate
+ONLY the single Korean claim provided into English in USPTO style.
+
+- Start your output with "{N}. " and produce nothing before it.
+- Use the same terminology as the previously translated claims provided as context.
+- Apply the same USPTO style rules (comprising:, semicolons, "of claim N, wherein/further comprising").
+- Output only the English claim text. No preamble, no closing remarks."""
+
+
+CLAIMS_REVIEW_PROMPT = """You are a USPTO patent attorney reviewing a Korean→English
+claims translation. You will receive the Korean source and the current English
+translation. Look for:
+
+1. Terminology drift — the same Korean term translated differently across claims.
+2. Missing or hallucinated elements relative to the Korean.
+3. Wrong USPTO structure — independent claims must end with "comprising:";
+   dependents must begin "The <noun> of claim N, wherein ..." or
+   "The <noun> of claim N, further comprising ...".
+4. Korean text that says "wherein ... further includes/comprises" but the English
+   omits "further comprising".
+
+If you find issues, return the corrected FULL set of claims in the same plain-text
+format as the input (each claim on its own line beginning with "N. ", claims
+separated by one blank line). If there are no issues, return the original English
+text unchanged. Output nothing else."""
 
 
 ABSTRACT_PROMPT = """You are a Korean→English patent translator. Translate the
@@ -175,27 +209,177 @@ def _glossary_block(glossary: dict[str, str]) -> str:
 # LLM helpers
 # ---------------------------------------------------------------------------
 
-def _parse_json(raw: str) -> dict:
-    """Parse JSON from an LLM response, tolerating ```fences``` and surrounding prose."""
+CLAIMS_MAX_TOKENS = 16384  # bulk claims + review pass — never want to truncate
+
+_GLOSSARY_SENTINEL_RE = re.compile(r"^\s*-{2,}\s*GLOSSARY\s*-{2,}\s*$", re.MULTILINE)
+_CLAIM_LINE_RE = re.compile(r"^(\d+)\.\s")
+_GLOSSARY_LINE_RE = re.compile(r"^\s*(.+?)\s*(?:->|→|=>|:)\s*(.+?)\s*$")
+
+
+def _parse_claims_response(raw: str) -> tuple[dict[str, str], dict[str, str]]:
+    """Parse a plain-text claims block followed by an optional ---GLOSSARY--- section."""
     text = raw.strip()
-    fence = re.match(r"```(?:json)?\s*(.*?)\s*```\s*$", text, re.DOTALL)
+    # Strip ``` fences if the model added them anyway.
+    fence = re.match(r"```[a-zA-Z]*\s*(.*?)\s*```\s*$", text, re.DOTALL)
     if fence:
-        text = fence.group(1)
-    start, end = text.find("{"), text.rfind("}")
-    if start != -1 and end > start:
-        text = text[start : end + 1]
-    return json.loads(text)
+        text = fence.group(1).strip()
+
+    parts = _GLOSSARY_SENTINEL_RE.split(text, maxsplit=1)
+    claims_block = parts[0].strip()
+    glossary_block = parts[1].strip() if len(parts) > 1 else ""
+
+    claims: dict[str, str] = {}
+    current_num: str | None = None
+    current_lines: list[str] = []
+    for line in claims_block.splitlines():
+        m = _CLAIM_LINE_RE.match(line)
+        if m:
+            if current_num is not None:
+                claims[current_num] = "\n".join(current_lines).rstrip()
+            current_num = m.group(1)
+            current_lines = [line]
+        elif current_num is not None:
+            current_lines.append(line)
+    if current_num is not None:
+        claims[current_num] = "\n".join(current_lines).rstrip()
+
+    glossary: dict[str, str] = {}
+    for line in glossary_block.splitlines():
+        m = _GLOSSARY_LINE_RE.match(line)
+        if m:
+            glossary[m.group(1).strip()] = m.group(2).strip()
+
+    return claims, glossary
 
 
-def translate_claims(client: LLMClient, korean: str) -> tuple[dict[str, str], dict[str, str]]:
-    """Returns (claim_num → English claim text, glossary)."""
-    raw = client.complete([
-        {"role": "system", "content": CLAIMS_PROMPT},
-        {"role": "user",   "content": korean},
-    ])
-    data = _parse_json(raw)
-    claims = {str(k): str(v).strip() for k, v in (data.get("claims") or {}).items()}
-    glossary = {str(k): str(v) for k, v in (data.get("glossary") or {}).items()}
+def _claim_korean_by_num(records: list[dict]) -> dict[str, str]:
+    """Group claim paragraphs by 【청구항 N】 anchor → joined Korean text."""
+    out: dict[str, list[str]] = {}
+    current: str | None = None
+    for r in records:
+        if r["role"] != "claim":
+            continue
+        m = CLAIM_HEADER_RE.match(r["text"])
+        if m:
+            current = m.group(1)
+            out.setdefault(current, []).append(r["text"])
+        elif current is not None:
+            out.setdefault(current, []).append(r["text"])
+    return {k: "\n".join(v) for k, v in out.items()}
+
+
+def _format_claims_block(claims: dict[str, str], order: list[str]) -> str:
+    """Re-emit claims as a plain-text block in the given numeric order."""
+    parts = [claims[n] for n in order if n in claims and claims[n].strip()]
+    return "\n\n".join(parts)
+
+
+def _retranslate_single_claim(
+    client: LLMClient,
+    num: str,
+    korean: str,
+    prior_english: str,
+    glossary: dict[str, str],
+) -> str:
+    user_parts: list[str] = []
+    if glossary:
+        user_parts.append(_glossary_block(glossary))
+    if prior_english:
+        user_parts.append("Previously translated claims (for terminology):")
+        user_parts.append(prior_english)
+        user_parts.append("")
+    user_parts.append(f"Korean claim {num}:")
+    user_parts.append(korean)
+    return client.complete(
+        [
+            {"role": "system", "content": CLAIM_RETRY_PROMPT.format(N=num)},
+            {"role": "user",   "content": "\n".join(user_parts)},
+        ],
+        max_tokens=CLAIMS_MAX_TOKENS,
+    ).strip()
+
+
+def _review_claims(
+    client: LLMClient,
+    korean_block: str,
+    english_block: str,
+    glossary: dict[str, str],
+) -> dict[str, str]:
+    """Run a review pass; return any corrected claims (may be empty)."""
+    user_parts: list[str] = []
+    if glossary:
+        user_parts.append(_glossary_block(glossary))
+    user_parts.append("Korean claims:")
+    user_parts.append(korean_block)
+    user_parts.append("")
+    user_parts.append("Current English translation:")
+    user_parts.append(english_block)
+    raw = client.complete(
+        [
+            {"role": "system", "content": CLAIMS_REVIEW_PROMPT},
+            {"role": "user",   "content": "\n".join(user_parts)},
+        ],
+        max_tokens=CLAIMS_MAX_TOKENS,
+    )
+    revised, _ = _parse_claims_response(raw)
+    return revised
+
+
+def translate_claims(
+    client: LLMClient,
+    korean_block: str,
+    records: list[dict],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Returns (claim_num → English claim text, glossary).
+
+    Strategy:
+      1. Bulk-translate all claims in one call (best for terminology consistency).
+      2. Validate: every 【청구항 N】 anchor in the source must have a non-empty
+         English claim. Retry missing ones individually with the rest as context.
+      3. Run a review pass on the assembled English block; apply any corrections.
+    """
+    # --- 1) bulk translate ---------------------------------------------------
+    raw = client.complete(
+        [
+            {"role": "system", "content": CLAIMS_PROMPT},
+            {"role": "user",   "content": korean_block},
+        ],
+        max_tokens=CLAIMS_MAX_TOKENS,
+    )
+    claims, glossary = _parse_claims_response(raw)
+
+    # --- 2) validate against the Korean anchors, retry missing ---------------
+    korean_by_num = _claim_korean_by_num(records)
+    expected = sorted(korean_by_num.keys(), key=int) if korean_by_num else \
+               sorted(claims.keys(), key=lambda s: int(s))
+
+    missing = [n for n in expected if not claims.get(n, "").strip()]
+    if missing:
+        print(f"      bulk pass missed {len(missing)} claim(s) {missing}; retrying individually…")
+        prior = _format_claims_block(claims, [n for n in expected if n not in missing])
+        for n in missing:
+            kr = korean_by_num.get(n)
+            if not kr:
+                continue
+            claims[n] = _retranslate_single_claim(client, n, kr, prior, glossary)
+            # extend prior context so each retry sees the previous retries too
+            prior = (prior + "\n\n" + claims[n]).strip()
+
+    # --- 3) review pass ------------------------------------------------------
+    english_block = _format_claims_block(claims, expected)
+    if english_block:
+        print("      running review pass…")
+        revised = _review_claims(client, korean_block, english_block, glossary)
+        applied = 0
+        for n, text in revised.items():
+            if n in expected and text.strip() and text.strip() != claims.get(n, "").strip():
+                claims[n] = text
+                applied += 1
+        if applied:
+            print(f"      review revised {applied} claim(s)")
+        else:
+            print("      review found no changes")
+
     return claims, glossary
 
 
@@ -275,16 +459,29 @@ def apply_claims(doc, records: list[dict], claims: dict[str, str]) -> None:
         return
 
     written: set[int] = set()
+    untranslated: list[str] = []
     for num, idx in anchors.items():
-        text = claims.get(num)
-        if text is None:
+        text = (claims.get(num) or "").strip()
+        if not text:
+            untranslated.append(num)
             continue
         set_paragraph_text(doc.paragraphs[idx], text)
         written.add(idx)
 
+    # Continuation paragraphs (non-anchor) are cleared because the English claim
+    # text already contains all elements. Anchor paragraphs whose claim never
+    # produced an English translation keep their Korean text so the failure is
+    # visible to the reviewer instead of silently disappearing.
     for r in claim_records:
-        if r["index"] not in written:
-            clear_paragraph(doc.paragraphs[r["index"]])
+        if r["index"] in written:
+            continue
+        if CLAIM_HEADER_RE.match(r["text"]):
+            continue
+        clear_paragraph(doc.paragraphs[r["index"]])
+
+    if untranslated:
+        print(f"      WARNING: {len(untranslated)} claim(s) without translation "
+              f"({untranslated}); Korean left in place")
 
 
 def apply_abstract(doc, records: list[dict], english: str) -> None:
@@ -334,7 +531,7 @@ def main() -> None:
     if claims_block:
         n_paras = sum(1 for r in records if r["role"] == "claim")
         print(f"[1/3] Translating claims ({n_paras} paragraphs, single LLM call)…")
-        claims_en, glossary = translate_claims(client, claims_block)
+        claims_en, glossary = translate_claims(client, claims_block, records)
         print(f"      got {len(claims_en)} claim(s); glossary={len(glossary)} entries")
     else:
         print("[1/3] No claims section found — skipping.")
