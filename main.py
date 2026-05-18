@@ -500,11 +500,33 @@ def _apply_output_font(doc) -> None:
 # Apply translations
 # ---------------------------------------------------------------------------
 
+def _format_claim_uspto(text: str) -> str:
+    """Apply USPTO-style line breaks and indentation to a single claim.
+
+    - Break after every ``;`` or ``:`` that's followed by more text.
+    - Indent every continuation line with a single tab. The first line
+      (claim-number + preamble) stays unindented.
+
+    Whitespace is normalized first so existing line breaks in the LLM output
+    don't compound with the ones we add.
+    """
+    if not text:
+        return text
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"([;:])\s+(?=\S)", r"\1\n", text)
+    lines = text.split("\n")
+    if len(lines) <= 1:
+        return text
+    return "\n".join([lines[0]] + ["\t" + line.strip() for line in lines[1:]])
+
+
 def apply_claims(doc, records: list[dict], claims: dict[str, str], *, progress: Progress = print) -> None:
     """Place each English claim onto the paragraph that held its 【청구항 N】 header.
 
-    Other paragraphs in the CLAIMS section are cleared so the original Korean
-    element-list paragraphs don't bleed through under the English claim.
+    Each claim is reformatted via :func:`_format_claim_uspto` before being
+    written. Other paragraphs in the CLAIMS section are cleared so the
+    original Korean element-list paragraphs don't bleed through under the
+    English claim.
     """
     claim_records = [r for r in records if r["role"] == "claim"]
     if not claim_records:
@@ -520,7 +542,8 @@ def apply_claims(doc, records: list[dict], claims: dict[str, str], *, progress: 
     # claim paragraph rather than dropping the translation on the floor.
     if not anchors:
         first = claim_records[0]["index"]
-        all_text = "\n\n".join(claims[k] for k in sorted(claims, key=lambda s: int(s)))
+        ordered = sorted(claims, key=lambda s: int(s))
+        all_text = "\n\n".join(_format_claim_uspto(claims[k]) for k in ordered)
         set_paragraph_text(doc.paragraphs[first], all_text)
         for r in claim_records[1:]:
             clear_paragraph(doc.paragraphs[r["index"]])
@@ -533,7 +556,7 @@ def apply_claims(doc, records: list[dict], claims: dict[str, str], *, progress: 
         if not text:
             untranslated.append(num)
             continue
-        set_paragraph_text(doc.paragraphs[idx], text)
+        set_paragraph_text(doc.paragraphs[idx], _format_claim_uspto(text))
         written.add(idx)
 
     # Continuation paragraphs (non-anchor) are cleared because the English claim
