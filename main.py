@@ -16,6 +16,7 @@ import argparse
 import logging
 import re
 import sys
+import time
 from collections import deque
 from pathlib import Path
 from typing import Callable
@@ -860,7 +861,17 @@ def main() -> None:
         sys.exit(f"input not found: {args.path}")
 
     out_path = resolve_output_path(args.path, args.output, args.suffix)
+
+    config = ClientConfig.from_env()
+    model = args.model or config.model
+    print(f"input:  {args.path}")
+    print(f"output: {out_path}")
+    print(f"model:  {model} @ {config.base_url}")
+    print()
+
+    t0 = time.monotonic()
     translate_file(args.path, out_path, model=args.model)
+    print(f"\nelapsed: {time.monotonic() - t0:.1f}s")
 
 
 if __name__ == "__main__":

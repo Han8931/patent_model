@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from main import resolve_output_path, translate_file
+from translate.client import ClientConfig
 
 
 def _discover(data_dir: Path) -> list[Path]:
@@ -64,8 +65,14 @@ def main() -> None:
 
     total = len(files)
     workers = max(1, args.workers)
-    print(f"found {total} file(s) under {args.data_dir}; workers={workers}, "
-          f"suffix={args.suffix!r}, model={args.model or '(env default)'}")
+
+    config = ClientConfig.from_env()
+    model = args.model or config.model
+    print(f"data:    {args.data_dir}  ({total} file(s))")
+    print(f"workers: {workers}")
+    print(f"suffix:  {args.suffix!r}")
+    print(f"model:   {model} @ {config.base_url}")
+    print()
 
     failures: list[tuple[Path, str]] = []
     t_start = time.monotonic()
