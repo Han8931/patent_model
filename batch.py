@@ -51,6 +51,30 @@ DELAY = 0.0          # seconds between API calls within one file (raise only if 
 # Worker (top-level function — required for multiprocessing pickle)
 # ---------------------------------------------------------------------------
 
+# Stdout filter for the batch worker. Only these patterns print to the
+# terminal — every other progress line (per-chunk DIAG, per-revision
+# BEFORE/AFTER blocks, individual segment failures, …) still lands in the
+# per-document .log file but doesn't flood stdout when N workers run in
+# parallel. The body translator already emits a heartbeat every 10 chunks,
+# so " done " catches those.
+_BATCH_STDOUT_KEEP = (
+    "Starting",
+    "Translating CLAIMS",
+    "Translating BODY",
+    "Translating ABSTRACT",
+    "ABSTRACT",
+    "Reviewing",
+    " done ",            # heartbeat lines: "BODY  10/63  done  87.4s"
+    " empty ",           # failed-chunk markers
+    " FAIL ",
+    " KOREAN ",
+    "WARNING:",
+    "Translation completed",
+    "Translation failed",
+    "Done →",
+)
+
+
 def _translate_file(job: dict) -> dict:
     """Translate one file. Returns a result dict with status and paths."""
     input_path = Path(job["input"])
@@ -63,7 +87,12 @@ def _translate_file(job: dict) -> dict:
         translator = PatentTranslator(config, batch_size=job["batch_size"])
 
         def _progress(msg: str) -> None:
-            print(f"[{name}] {msg}", flush=True)
+            # Always write to the per-document .log via the translator's own
+            # logger; only the SUBSET of messages above hits stdout. With 4
+            # workers running in parallel, this keeps the terminal readable
+            # while preserving full audit detail in each .log file.
+            if any(p in msg for p in _BATCH_STDOUT_KEEP):
+                print(f"[{name}] {msg}", flush=True)
 
         _progress("Starting…")
         translator.translate_document(
