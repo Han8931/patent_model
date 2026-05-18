@@ -26,7 +26,9 @@ def _discover(data_dir: Path) -> list[Path]:
     return sorted(f for f in data_dir.rglob("*.docx") if not f.name.startswith("~$"))
 
 
-def _process(idx: int, total: int, in_path: Path, suffix: str) -> tuple[Path, float, str | None]:
+def _process(
+    idx: int, total: int, in_path: Path, suffix: str, model: str | None
+) -> tuple[Path, float, str | None]:
     """Translate one file. Returns (path, elapsed_seconds, error_or_None)."""
     prefix = f"[{idx}/{total}] {in_path.name}"
     log = lambda msg: print(f"{prefix} {msg}", flush=True)
@@ -34,7 +36,7 @@ def _process(idx: int, total: int, in_path: Path, suffix: str) -> tuple[Path, fl
     out_path = resolve_output_path(in_path, None, suffix)
     t0 = time.monotonic()
     try:
-        translate_file(in_path, out_path, progress=log)
+        translate_file(in_path, out_path, progress=log, model=model)
         return in_path, time.monotonic() - t0, None
     except Exception as e:
         return in_path, time.monotonic() - t0, f"{type(e).__name__}: {e}"
@@ -48,6 +50,8 @@ def main() -> None:
                         help="Parallel worker count (default: 1)")
     parser.add_argument("--suffix", default="",
                         help="Suffix appended to each output stem (e.g. --suffix _v1)")
+    parser.add_argument("--model", default=None,
+                        help="Override LLM_MODEL from .env (e.g. --model qwen3.5)")
     args = parser.parse_args()
 
     if not args.data_dir.is_dir():
@@ -60,14 +64,15 @@ def main() -> None:
 
     total = len(files)
     workers = max(1, args.workers)
-    print(f"found {total} file(s) under {args.data_dir}; workers={workers}, suffix={args.suffix!r}")
+    print(f"found {total} file(s) under {args.data_dir}; workers={workers}, "
+          f"suffix={args.suffix!r}, model={args.model or '(env default)'}")
 
     failures: list[tuple[Path, str]] = []
     t_start = time.monotonic()
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = [
-            ex.submit(_process, i + 1, total, f, args.suffix)
+            ex.submit(_process, i + 1, total, f, args.suffix, args.model)
             for i, f in enumerate(files)
         ]
         for fut in as_completed(futures):

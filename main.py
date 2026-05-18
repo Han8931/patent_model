@@ -634,13 +634,23 @@ def resolve_output_path(in_path: Path, output: Path | None, suffix: str) -> Path
     return out_path
 
 
-def translate_file(in_path: Path, out_path: Path, *, progress: Progress = print) -> None:
+def translate_file(
+    in_path: Path,
+    out_path: Path,
+    *,
+    progress: Progress = print,
+    model: str | None = None,
+) -> None:
     """Translate one .docx end-to-end. Used by both the CLI and ``batch.py``.
 
     Errors are logged to ``<out_path>.log`` (overwriting per run). Failures in
     a single description paragraph leave the Korean text in place rather than
     aborting the whole file; the same is true for total claims or abstract
     failures — they're logged and the pipeline continues.
+
+    *model* overrides ``LLM_MODEL`` from ``.env`` for this run only; the rest
+    of the LLM config (base URL, API key, temperature, max_tokens) still comes
+    from the environment.
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     log_path = out_path.with_suffix(".log")
@@ -648,7 +658,11 @@ def translate_file(in_path: Path, out_path: Path, *, progress: Progress = print)
     logger.info(f"translate {in_path} -> {out_path}")
 
     try:
-        client = LLMClient(ClientConfig.from_env())
+        config = ClientConfig.from_env()
+        if model:
+            config.model = model
+        logger.info(f"model={config.model} base_url={config.base_url}")
+        client = LLMClient(config)
         doc = Document(in_path)
         records = scan_paragraphs(doc)
 
@@ -735,13 +749,15 @@ def main() -> None:
                         help="Output .docx (default: output/<stem>_en.docx)")
     parser.add_argument("--suffix", default="",
                         help="Suffix inserted before .docx (e.g. --suffix _v1 → ..._en_v1.docx)")
+    parser.add_argument("--model", default=None,
+                        help="Override LLM_MODEL from .env (e.g. --model qwen3.5)")
     args = parser.parse_args()
 
     if not args.path.is_file():
         sys.exit(f"input not found: {args.path}")
 
     out_path = resolve_output_path(args.path, args.output, args.suffix)
-    translate_file(args.path, out_path)
+    translate_file(args.path, out_path, model=args.model)
 
 
 if __name__ == "__main__":
