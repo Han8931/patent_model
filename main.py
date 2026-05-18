@@ -16,6 +16,7 @@ import argparse
 import logging
 import re
 import sys
+from collections import deque
 from pathlib import Path
 from typing import Callable
 
@@ -28,6 +29,12 @@ from translate.client import ClientConfig, LLMClient
 
 
 OUTPUT_FONT = "Times New Roman"
+
+# How many previous (Korean, English) description paragraphs to feed back to the
+# LLM as continuity context. Bigger window → smoother antecedent/style flow at
+# higher token cost per call. 3 is a reasonable default; bump if descriptions
+# rely heavily on multi-paragraph carry-over.
+DESCRIPTION_CONTEXT_WINDOW = 3
 
 Progress = Callable[[str], None]
 
@@ -87,6 +94,21 @@ def detect_section(text: str) -> str | None:
 CLAIM_HEADER_RE = re.compile(r"^[【\[]\s*청구항\s*(\d+)\s*[】\]]\s*")
 
 
+# Inline images (DrawingML), legacy pictures (VML), and OMML equations live as
+# child elements of <w:p>/<w:r>, not as text. We detect them so the pipeline
+# can pass those paragraphs through untouched instead of clearing/rewriting them.
+_MEDIA_TAGS = (qn("w:drawing"), qn("w:pict"), qn("m:oMath"), qn("m:oMathPara"))
+
+
+def _has_media(p: Paragraph) -> bool:
+    """True if *p* contains an inline image, legacy picture, or OMML equation."""
+    el = p._element
+    for tag in _MEDIA_TAGS:
+        if el.find(f".//{tag}") is not None:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # DOCX paragraph scan
 # ---------------------------------------------------------------------------
@@ -94,7 +116,13 @@ CLAIM_HEADER_RE = re.compile(r"^[【\[]\s*청구항\s*(\d+)\s*[】\]]\s*")
 def scan_paragraphs(doc) -> list[dict]:
     """Walk the document and tag each paragraph with its section + role.
 
-    role ∈ {"header", "claim", "abstract", "description", "blank"}
+    role ∈ {"header", "claim", "abstract", "description", "blank", "media"}
+
+    A paragraph that contains an image or an equation is classified as
+    ``"media"`` regardless of its Korean text content. Those paragraphs are
+    never translated and never rewritten — only the surrounding text-only
+    paragraphs flow through the LLM. This protects equations and figures from
+    being clobbered by the text-only rewrite path.
     """
     records: list[dict] = []
     current: str | None = None
@@ -104,6 +132,9 @@ def scan_paragraphs(doc) -> list[dict]:
         if section is not None:
             current = section
             records.append({"index": i, "section": section, "role": "header", "text": text.strip()})
+            continue
+        if _has_media(p):
+            records.append({"index": i, "section": current, "role": "media", "text": text})
             continue
         if not text.strip():
             records.append({"index": i, "section": current, "role": "blank", "text": ""})
@@ -204,6 +235,10 @@ the Korean paragraph below into English in USPTO style.
 
 - Translate faithfully; do not add or omit content.
 - Use the glossary terms verbatim whenever they appear.
+- If a "Recent context" section is provided, use it to maintain terminology,
+  pronoun antecedents, and style continuity with the preceding paragraphs.
+  Do NOT retranslate the context — translate ONLY the target paragraph that
+  is explicitly marked for translation.
 - Return only the English text, no preamble or commentary."""
 
 
@@ -212,6 +247,25 @@ def _glossary_block(glossary: dict[str, str]) -> str:
         return ""
     lines = [f"  {kr}  →  {en}" for kr, en in glossary.items()]
     return "Glossary (use these exact English terms):\n" + "\n".join(lines) + "\n\n"
+
+
+def _context_block(pairs) -> str:
+    """Format the rolling (Korean, English) pairs as 'already translated' context.
+
+    Whitespace inside each paragraph is collapsed to keep the prompt compact;
+    the LLM doesn't need the original line layout to use the pair for continuity.
+    """
+    if not pairs:
+        return ""
+    lines = [
+        "Recent context (already translated; do NOT retranslate — for continuity only):"
+    ]
+    for kr, en in pairs:
+        kr_one = re.sub(r"\s+", " ", kr).strip()
+        en_one = re.sub(r"\s+", " ", en).strip()
+        lines.append(f"- Korean:  {kr_one}")
+        lines.append(f"  English: {en_one}")
+    return "\n".join(lines) + "\n\n"
 
 
 # ---------------------------------------------------------------------------
@@ -419,11 +473,29 @@ def translate_abstract(client: LLMClient, korean: str, glossary: dict[str, str])
     ]).strip()
 
 
-def translate_paragraph(client: LLMClient, korean: str, glossary: dict[str, str]) -> str:
-    user = _glossary_block(glossary) + "Korean paragraph:\n" + korean
+def translate_paragraph(
+    client: LLMClient,
+    korean: str,
+    glossary: dict[str, str],
+    *,
+    context=None,
+) -> str:
+    """Translate one description paragraph.
+
+    *context* is an iterable of ``(korean, english)`` pairs from the immediately
+    preceding paragraphs. The LLM sees them as read-only continuity, not as
+    targets to retranslate. Pass ``None`` (or an empty iterable) on the first
+    paragraph; the loop in :func:`translate_file` grows the window from there.
+    """
+    parts: list[str] = []
+    if glossary:
+        parts.append(_glossary_block(glossary))
+    if context:
+        parts.append(_context_block(context))
+    parts.append("Korean paragraph to translate:\n" + korean)
     return client.complete([
         {"role": "system", "content": DESCRIPTION_PROMPT},
-        {"role": "user",   "content": user},
+        {"role": "user",   "content": "".join(parts)},
     ]).strip()
 
 
@@ -666,6 +738,26 @@ def translate_file(
         doc = Document(in_path)
         records = scan_paragraphs(doc)
 
+        media = [r for r in records if r["role"] == "media"]
+        mixed_media = [r for r in media if r["text"].strip()]
+        if media:
+            logger.info(
+                f"{len(media)} paragraph(s) contain inline images/equations; "
+                f"passing through untouched"
+            )
+        if mixed_media:
+            progress(
+                f"      NOTE: {len(mixed_media)} paragraph(s) mix text with "
+                f"images/equations; left untranslated (see {log_path.name})"
+            )
+            logger.warning(
+                f"{len(mixed_media)} paragraph(s) have Korean text alongside "
+                f"inline media; not translated to keep media intact"
+            )
+            for r in mixed_media:
+                snippet = re.sub(r"\s+", " ", r["text"])[:120]
+                logger.warning(f"  mixed-media paragraph idx={r['index']}: '{snippet}…'")
+
         # ----- 1) claims (single LLM call, all claims at once) -----
         claims_block = collect_block(records, "claim")
         claims_en: dict[str, str] = {}
@@ -700,14 +792,25 @@ def translate_file(
             progress("[2/3] No abstract section found — skipping.")
             logger.info("no abstract section")
 
-        # ----- 3) description, paragraph-by-paragraph -----
+        # ----- 3) description, paragraph-by-paragraph with rolling context -----
         desc_records = [r for r in records if r["role"] == "description" and r["text"].strip()]
-        progress(f"[3/3] Translating description ({len(desc_records)} paragraphs)…")
+        progress(
+            f"[3/3] Translating description ({len(desc_records)} paragraphs, "
+            f"context window={DESCRIPTION_CONTEXT_WINDOW})…"
+        )
         total = len(desc_records)
         failures = 0
+        # Only successful (korean, english) pairs feed back as context — a failed
+        # paragraph stays in the source as Korean and is omitted from context so
+        # it can't pollute the next call's terminology.
+        context: deque = deque(maxlen=DESCRIPTION_CONTEXT_WINDOW)
         for n, r in enumerate(desc_records, 1):
             try:
-                r["translation"] = translate_paragraph(client, r["text"], glossary)
+                translation = translate_paragraph(
+                    client, r["text"], glossary, context=context
+                )
+                r["translation"] = translation
+                context.append((r["text"], translation))
             except Exception as e:
                 failures += 1
                 snippet = r["text"][:160].replace("\n", " ")
