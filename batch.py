@@ -18,7 +18,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from main import resolve_output_path, translate_file
+from translate import resolve_output_path, translate_file
 from translate.client import ClientConfig
 
 
