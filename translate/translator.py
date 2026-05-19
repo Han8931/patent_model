@@ -160,6 +160,8 @@ def _retranslate_single_claim(
     korean: str,
     prior_english: str,
     glossary: dict[str, str],
+    *,
+    claim_type: str | None = None,
 ) -> str:
     user_parts: list[str] = []
     if glossary:
@@ -167,6 +169,9 @@ def _retranslate_single_claim(
     if prior_english:
         user_parts.append("Previously translated claims (for terminology):")
         user_parts.append(prior_english)
+        user_parts.append("")
+    if claim_type:
+        user_parts.append(f"Claim {num} type: {claim_type}")
         user_parts.append("")
     user_parts.append(f"Korean claim {num}:")
     user_parts.append(korean)
@@ -212,6 +217,7 @@ def translate_claims(
     *,
     progress: Progress = print,
     logger: logging.Logger | None = None,
+    claim_types: dict[str, str] | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Returns (claim_num → English claim text, glossary).
 
@@ -220,12 +226,29 @@ def translate_claims(
       2. Validate: every 【청구항 N】 anchor in the source must have a non-empty
          English claim. Retry missing ones individually with the rest as context.
       3. Run a review pass on the assembled English block; apply any corrections.
+
+    *claim_types* (optional) is a ``{claim_num: "INDEPENDENT" | "DEPENDENT, parent=N"}``
+    map from the agentic classifier. When provided, the types are prepended to
+    the bulk + retry user messages so the LLM can pick the right preamble form
+    up front instead of inferring it.
     """
+    type_block = ""
+    if claim_types:
+        type_lines = [
+            f"- Claim {n}: {claim_types[n]}"
+            for n in sorted(claim_types, key=lambda s: int(s))
+        ]
+        type_block = (
+            "Claim types (use these to pick the right preamble form):\n"
+            + "\n".join(type_lines)
+            + "\n\n"
+        )
+
     # --- 1) bulk translate ---------------------------------------------------
     raw = client.complete(
         [
             {"role": "system", "content": CLAIMS_PROMPT},
-            {"role": "user",   "content": korean_block},
+            {"role": "user",   "content": type_block + korean_block},
         ],
         max_tokens=CLAIMS_MAX_TOKENS,
     )
@@ -247,7 +270,10 @@ def translate_claims(
             if not kr:
                 continue
             try:
-                claims[n] = _retranslate_single_claim(client, n, kr, prior, glossary)
+                claims[n] = _retranslate_single_claim(
+                    client, n, kr, prior, glossary,
+                    claim_type=(claim_types.get(n) if claim_types else None),
+                )
             except Exception as e:
                 progress(f"      retry of claim {n} failed: {e!r}")
                 if logger:

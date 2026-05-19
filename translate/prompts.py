@@ -235,3 +235,71 @@ the Korean paragraph below into English in USPTO style.
   Do NOT retranslate the context — translate ONLY the target paragraph that
   is explicitly marked for translation.
 - Return only the English text, no preamble or commentary."""
+
+
+# ---------------------------------------------------------------------------
+# Agentic-mode classifiers (used by ``translate/agent.py``)
+# ---------------------------------------------------------------------------
+
+SECTION_CLASSIFY_PROMPT = """You are a Korean patent document analyzer.
+Classify each numbered paragraph by its section role.
+
+Use exactly these labels (uppercase):
+
+- HEADER       — a bracketed Korean section marker. Examples:
+                 [요약서], [청구범위], [특허청구범위], [발명의 설명],
+                 [기술분야], 【청구범위】.
+- CLAIM        — a patent claim (numbered) or any continuation paragraph
+                 that belongs to a claim's element list. Claim paragraphs
+                 typically appear after the [청구범위] / [특허청구범위] header
+                 and often start with 【청구항 N】 or [청구항 N].
+- ABSTRACT     — part of the patent abstract (a short summary of the
+                 invention; typically right after [요약서] / [요약]).
+- DESCRIPTION  — any other technical or descriptive content: technical
+                 field, background, summary, embodiments, drawings
+                 descriptions, etc.
+- BLANK        — paragraph with no visible text.
+
+Rules:
+- Paragraphs are presented in document order. A section starts at its
+  HEADER paragraph and continues until the next HEADER. Use this sequence
+  to disambiguate (e.g., paragraphs after [요약서] are ABSTRACT until the
+  next header appears).
+- CLAIM paragraphs include continuation lines such as element lists with
+  semicolons — not just the 【청구항 N】 anchor.
+- A paragraph already pre-marked as <MEDIA> in the input must be labeled
+  exactly MEDIA (it contains an image or equation; do not reclassify it).
+
+Output format — one line per paragraph in numeric order. No commentary,
+no preamble, no markdown fences:
+
+1: HEADER
+2: ABSTRACT
+3: BLANK
+4: CLAIM
+...
+
+The number must be the 1-based paragraph index shown in the input."""
+
+
+CLAIM_CLASSIFY_PROMPT = """You are a Korean patent claim analyzer. For each
+claim below, decide whether it is INDEPENDENT or DEPENDENT.
+
+- INDEPENDENT — stands alone; does NOT refer back to another claim.
+- DEPENDENT   — refers back to one or more previous claims. Korean
+                dependency markers include:
+                  "제1항에 있어서", "제 1 항의 ~",
+                  "제1항 내지 제3항 중 어느 한 항에 있어서",
+                  "청구항 1에 있어서", "청구항 1의", "청구항 1에 따른".
+
+Output format — one line per claim, in claim-number order:
+
+1: INDEPENDENT
+2: DEPENDENT, parent=1
+3: DEPENDENT, parent=1
+4: DEPENDENT, parent=3
+...
+
+For DEPENDENT claims, ``parent=N`` is the FIRST parent claim number when
+the Korean cites multiple parents (e.g., "제1항 내지 제3항 중 어느 한 항"
+→ ``parent=1``). Output nothing else."""

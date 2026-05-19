@@ -18,7 +18,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from translate import resolve_output_path, translate_file
+from translate import resolve_output_path, translate_file, translate_file_agent
 from translate.client import ClientConfig
 
 
@@ -28,16 +28,17 @@ def _discover(data_dir: Path) -> list[Path]:
 
 
 def _process(
-    idx: int, total: int, in_path: Path, suffix: str, model: str | None
+    idx: int, total: int, in_path: Path, suffix: str, model: str | None, agent: bool
 ) -> tuple[Path, float, str | None]:
     """Translate one file. Returns (path, elapsed_seconds, error_or_None)."""
     prefix = f"[{idx}/{total}] {in_path.name}"
     log = lambda msg: print(f"{prefix} {msg}", flush=True)
 
     out_path = resolve_output_path(in_path, None, suffix)
+    pipeline = translate_file_agent if agent else translate_file
     t0 = time.monotonic()
     try:
-        translate_file(in_path, out_path, progress=log, model=model)
+        pipeline(in_path, out_path, progress=log, model=model)
         return in_path, time.monotonic() - t0, None
     except Exception as e:
         return in_path, time.monotonic() - t0, f"{type(e).__name__}: {e}"
@@ -53,6 +54,8 @@ def main() -> None:
                         help="Suffix appended to each output stem (e.g. --suffix _v1)")
     parser.add_argument("--model", default=None,
                         help="Override LLM_MODEL from .env (e.g. --model qwen3.5)")
+    parser.add_argument("--agent", action="store_true",
+                        help="Use the agentic pipeline (LLM section + dep/ind classification)")
     args = parser.parse_args()
 
     if not args.data_dir.is_dir():
@@ -72,6 +75,7 @@ def main() -> None:
     print(f"workers: {workers}")
     print(f"suffix:  {args.suffix!r}")
     print(f"model:   {model} @ {config.base_url}")
+    print(f"mode:    {'agent' if args.agent else 'heuristic'}")
     print()
 
     failures: list[tuple[Path, str]] = []
@@ -79,7 +83,7 @@ def main() -> None:
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = [
-            ex.submit(_process, i + 1, total, f, args.suffix, args.model)
+            ex.submit(_process, i + 1, total, f, args.suffix, args.model, args.agent)
             for i, f in enumerate(files)
         ]
         for fut in as_completed(futures):

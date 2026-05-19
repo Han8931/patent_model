@@ -15,7 +15,7 @@ import sys
 import time
 from pathlib import Path
 
-from translate import resolve_output_path, translate_file
+from translate import resolve_output_path, translate_file, translate_file_agent
 from translate.client import ClientConfig
 
 
@@ -28,6 +28,8 @@ def main() -> None:
                         help="Suffix inserted before .docx (e.g. --suffix _v1 → ..._en_v1.docx)")
     parser.add_argument("--model", default=None,
                         help="Override LLM_MODEL from .env (e.g. --model qwen3.5)")
+    parser.add_argument("--agent", action="store_true",
+                        help="Use the agentic pipeline: LLM-classified sections + LLM dep/ind claims.")
     args = parser.parse_args()
 
     if not args.path.is_file():
@@ -40,10 +42,12 @@ def main() -> None:
     print(f"input:  {args.path}")
     print(f"output: {out_path}")
     print(f"model:  {model} @ {config.base_url}")
+    print(f"mode:   {'agent' if args.agent else 'heuristic'}")
     print()
 
+    pipeline = translate_file_agent if args.agent else translate_file
     t0 = time.monotonic()
-    translate_file(args.path, out_path, model=args.model)
+    pipeline(args.path, out_path, model=args.model)
     print(f"\nelapsed: {time.monotonic() - t0:.1f}s")
 
 
