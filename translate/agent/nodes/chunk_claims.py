@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 
+from ..claim_classifier import classify_claim, parse_dependency
 from ..docx_utils import extract_all_text, extract_math_texts, has_drawing, has_math
 from ..state import Chunk, TranslationState
 
@@ -140,4 +141,27 @@ def chunk_claims(state: TranslationState) -> dict:
             current_text_parts.append(text)
 
     flush()
+
+    specs_by_num = {}
+    for chunk in sorted(
+        (c for c in chunks if c.claim_num is not None),
+        key=lambda c: c.claim_num or 0,
+    ):
+        parents, _ = parse_dependency(chunk.text)
+        parent_kind = None
+        if parents:
+            parent = specs_by_num.get(parents[0])
+            if parent is not None:
+                parent_kind = parent.claim_kind
+        spec = classify_claim(
+            chunk.claim_num or 0,
+            chunk.text,
+            parent_kind=parent_kind,
+        )
+        specs_by_num[spec.claim_num] = spec
+        chunk.claim_kind = spec.claim_kind
+        chunk.is_independent = spec.is_independent
+        chunk.parent_claim_nums = spec.parent_claim_nums
+        chunk.multi_parent_kind = spec.multi_parent_kind
+
     return {"chunks_claims": chunks}

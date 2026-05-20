@@ -17,6 +17,7 @@ from ..nodes.translate_claims import (
     _assert_claims_translated,
     _contains_hangul,
     _minimal_cleanup,
+    _repair_dependent_claims,
 )
 from ..prompts import build_decision_messages, build_revision_messages
 from ..state import Chunk, TranslationState
@@ -147,6 +148,7 @@ def make_revise(kind: SectionKind) -> Callable[[TranslationState], dict]:
                 applied += 1
 
         if kind == "claims":
+            _repair_dependent_claims(chunks)
             _assert_claims_translated(chunks)
 
         if verbose:

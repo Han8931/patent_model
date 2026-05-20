@@ -33,19 +33,19 @@ class WordMathStub:
                 "actor_phrase": "",
                 "confidence": "high",
             })
-        if "Translate Korean claim" in user:
-            return json.dumps({
-                "text": (
-                    "A control device comprising:\n"
-                    "an output unit satisfying the following mathematical expressions:\n"
-                    "[EQUATION_1]\n"
-                    "[EQUATION_2]\n"
-                    "wherein A₁ + B₂/2 is a first combined input value; "
-                    "B₂ − C is a second combined input value; "
-                    "and C² + 1/2 is a correction value."
-                ),
-                "key_terms": [],
-            })
+        if "===== CLAIM" in user:
+            return (
+                "===== CLAIM 1 =====\n"
+                "A control device comprising:\n"
+                "an output unit satisfying the following mathematical expressions:\n"
+                "[EQUATION_1]\n"
+                "[EQUATION_2]\n"
+                "wherein A₁ + B₂/2 is a first combined input value; "
+                "B₂ − C is a second combined input value; "
+                "and C² + 1/2 is a correction value.\n\n"
+                "===== GLOSSARY =====\n"
+                "제어 장치 → control device\n"
+            )
         if "제어부는 다음 수학식들을 이용하여 출력값을 산출한다" in user:
             return json.dumps({
                 "text": (

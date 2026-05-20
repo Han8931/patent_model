@@ -182,6 +182,11 @@ BULK_CLAIMS_SYSTEM = (
     "Translate each Korean claim to English in USPTO style. "
     "Return each claim's English under the same '===== CLAIM N =====' banner "
     "that precedes it; keep every [EQUATION_N] marker verbatim. "
+    "Translate every bracketed parenthetical phrase instead of dropping it, "
+    "and do not omit any sentence, clause, element, step, range, or condition. "
+    "For dependent claims, use 'further comprising' when the Korean adds a "
+    "new element or step using 더, 추가로, 부가적으로, 또한, or 나아가; use "
+    "'wherein' only for limitations of an existing element. "
     "After the last claim, list the Korean→English terms you used under a "
     "'===== GLOSSARY =====' banner, one per line as 'korean → english'."
 )
@@ -197,6 +202,30 @@ def build_claims_bulk_messages(
     return [
         {"role": "system", "content": BULK_CLAIMS_SYSTEM},
         {"role": "user", "content": "\n".join(parts)},
+    ]
+
+
+def build_claim_retry_messages(
+    claim_num: int,
+    korean_text: str,
+    problem: str,
+) -> list[dict]:
+    system = (
+        "Translate one Korean patent claim to English in USPTO style. "
+        "Return only the English claim text beginning with the claim number. "
+        "Preserve every limitation and every [EQUATION_N] marker. Translate "
+        "all bracketed or parenthetical Korean content; do not omit it. "
+        "Use 'further comprising' for dependent claims that add a new element "
+        "or step, and 'wherein' only for limitations of existing elements."
+    )
+    user = (
+        f"Previous bulk translation was unusable: {problem}\n\n"
+        f"===== CLAIM {claim_num} =====\n"
+        f"{korean_text}"
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
     ]
 
 

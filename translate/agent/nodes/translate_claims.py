@@ -20,8 +20,15 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from ..claim_classifier import (
+    PreambleSpec,
+    build_dependent_preamble,
+    dependent_adds_subject_matter,
+    extract_preamble,
+)
 from ..docx_utils import _SEMICOLON_INDENT, _indent_after_colon, _normalize_unicode
 from ..prompts import (
+    build_claim_retry_messages,
     build_claims_bulk_messages,
     parse_claims_bulk_glossary,
     parse_claims_bulk_response,
@@ -163,6 +170,132 @@ def _hangul_count(text: str) -> int:
     return sum(1 for c in (text or "") if _HANGUL_RE.fullmatch(c))
 
 
+_EQUATION_MARKER_RE = re.compile(r"\[EQUATION_\d+\]")
+_BRACKETED_HANGUL_RE = re.compile(r"[\[(（【][^\])）】\n]*[가-힯][^\])）】\n]*[\])）】]")
+_LEADING_NUM_RE = re.compile(r"^\s*\d+\s*[.)]\s*")
+_DEPENDENT_PREFIX_RE = re.compile(
+    r"^The\s+.+?\s+of\s+(?:claim\s+\d+(?:\s+or\s+claim\s+\d+)?|"
+    r"any\s+one\s+of\s+claims\s+\d+\s+to\s+\d+),\s*"
+    r"(?P<conn>wherein|further\s+comprising)\s+",
+    re.IGNORECASE | re.DOTALL,
+)
+_INDEPENDENT_PREFIX_RE = re.compile(
+    r"^A[n]?\s+.+?\s+(?:comprising|including|having)\s*:\s*",
+    re.IGNORECASE | re.DOTALL,
+)
+_ADDITION_VERB_RE = re.compile(
+    r"^(?:wherein\s+)?(?:the\s+.+?\s+)?(?:further\s+)?"
+    r"(?:comprises|comprising|includes|including|has|having)\s+",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _lower_initial(text: str) -> str:
+    if not text:
+        return text
+    return text[0].lower() + text[1:] if text[0].isupper() else text
+
+
+def _strip_terminal_period(text: str) -> str:
+    return re.sub(r"\s*\.\s*$", "", text.strip())
+
+
+def _extract_dependent_tail(text: str, *, source_adds: bool) -> str:
+    body = _LEADING_NUM_RE.sub("", text.strip())
+    body = _DEPENDENT_PREFIX_RE.sub("", body, count=1)
+    body = _INDEPENDENT_PREFIX_RE.sub("", body, count=1)
+    body = re.sub(r"^(?:wherein|where)\s+", "", body, flags=re.IGNORECASE)
+    if source_adds:
+        body = _ADDITION_VERB_RE.sub("", body, count=1)
+    return _lower_initial(_strip_terminal_period(body))
+
+
+def _ensure_terminal_period(text: str) -> str:
+    text = text.rstrip()
+    return text if text.endswith(".") else text + "."
+
+
+def _claim_validation_problem(source: str, translation: str) -> str | None:
+    if not translation.strip():
+        return "missing translation"
+    if _contains_hangul(translation):
+        return "Korean/Hangul left in translation"
+
+    source_markers = set(_EQUATION_MARKER_RE.findall(source))
+    missing_markers = sorted(m for m in source_markers if m not in translation)
+    if missing_markers:
+        return f"missing equation marker(s): {', '.join(missing_markers)}"
+
+    source_bracketed = _BRACKETED_HANGUL_RE.findall(source)
+    if source_bracketed:
+        translated_bracketed = re.findall(r"[\[(（【][^\])）】\n]{2,}[\])）】]", translation)
+        if len(translated_bracketed) < len(source_bracketed):
+            return "bracketed Korean content appears omitted"
+
+    source_units = [
+        p.strip()
+        for p in re.split(r"[;；。\n]+|\s+및\s+|\s+또는\s+", source)
+        if p.strip() and not _EQUATION_MARKER_RE.fullmatch(p.strip())
+    ]
+    if len(source_units) >= 4:
+        english_units = [
+            p.strip()
+            for p in re.split(r"[;\n]+|\s+\band\b\s+|\s+\bor\b\s+", translation)
+            if p.strip()
+        ]
+        if len(english_units) < max(2, len(source_units) - 2):
+            return "translation is suspiciously shorter than the source claim"
+
+    return None
+
+
+def _repair_dependent_claims(chunks: list[Chunk]) -> None:
+    by_num = {c.claim_num: c for c in chunks if c.claim_num is not None}
+    preambles: dict[int, PreambleSpec] = {}
+
+    for chunk in sorted(by_num.values(), key=lambda c: c.claim_num or 0):
+        if not chunk.translation or chunk.is_independent is False:
+            continue
+        kind = chunk.claim_kind or "device"
+        noun, actor = extract_preamble(
+            _LEADING_NUM_RE.sub("", chunk.translation),
+            kind,
+            korean_source=chunk.text,
+        )
+        chunk.noun_phrase = noun
+        chunk.actor_phrase = actor
+        preambles[chunk.claim_num or 0] = PreambleSpec(
+            claim_num=chunk.claim_num or 0,
+            claim_kind=kind,
+            noun_phrase=noun,
+            actor_phrase=actor,
+        )
+
+    for chunk in sorted(by_num.values(), key=lambda c: c.claim_num or 0):
+        if not chunk.translation or chunk.is_independent is not False:
+            continue
+        if not chunk.parent_claim_nums:
+            continue
+        parent = preambles.get(chunk.parent_claim_nums[0])
+        if parent is None:
+            continue
+        source_adds = dependent_adds_subject_matter(chunk.text)
+        connective = "further comprising" if source_adds else "wherein"
+        prefix = build_dependent_preamble(
+            parent,
+            chunk.parent_claim_nums,
+            chunk.multi_parent_kind,
+        )
+        tail = _extract_dependent_tail(chunk.translation, source_adds=source_adds)
+        if not tail:
+            continue
+        chunk.translation = _normalize_claim_breaks(
+            _ensure_terminal_period(
+                f"{chunk.claim_num}. {prefix}, {connective} {tail}"
+            )
+        )
+
+
 def _assert_claims_translated(chunks: list[Chunk]) -> None:
     """Hard guard used by the review node after applying revisions.
 
@@ -176,9 +309,13 @@ def _assert_claims_translated(chunks: list[Chunk]) -> None:
             continue
         if not c.translation:
             failed.append((c.claim_num, "MISSING translation"))
-        elif _contains_hangul(c.translation):
-            n_ko = _hangul_count(c.translation)
-            failed.append((c.claim_num, f"HANGUL leftover ({n_ko} chars)"))
+            continue
+        problem = _claim_validation_problem(c.text, c.translation)
+        if problem:
+            if _contains_hangul(c.translation):
+                n_ko = _hangul_count(c.translation)
+                problem = f"HANGUL leftover ({n_ko} chars)"
+            failed.append((c.claim_num, problem))
     if failed:
         details = "\n".join(f"  claim {num}: {reason}" for num, reason in failed)
         raise RuntimeError(
@@ -286,12 +423,40 @@ def translate_claims(state: TranslationState) -> dict:
                 print(
                     f"  claim {num:>3}: HANGUL leftover "
                     f"({n_ko}/{len(text)} chars) — '{_snippet(text, 60)}'"
-                )
+            )
             continue
         cleaned = _minimal_cleanup(num, text)
+        problem = _claim_validation_problem(chunk.text, cleaned)
+        if problem:
+            if verbose:
+                print(f"  claim {num:>3}: retrying ({problem})")
+            try:
+                retry_raw = client.complete(
+                    build_claim_retry_messages(num, chunk.text, problem)
+                )
+                retry_by_num = parse_claims_bulk_response(retry_raw)
+                retry_text = retry_by_num.get(num) or retry_raw
+                retry_cleaned = _minimal_cleanup(num, retry_text)
+                retry_problem = _claim_validation_problem(chunk.text, retry_cleaned)
+                if retry_problem:
+                    chunk.translation = ""
+                    failed.append((num, retry_problem, _snippet(retry_cleaned)))
+                    if verbose:
+                        print(
+                            f"  claim {num:>3}: retry unusable "
+                            f"({retry_problem}) — '{_snippet(retry_cleaned, 60)}'"
+                        )
+                    continue
+                cleaned = retry_cleaned
+            except Exception as exc:
+                chunk.translation = ""
+                failed.append((num, f"retry failed ({type(exc).__name__}: {exc})", ""))
+                continue
         chunk.translation = cleaned
         if verbose:
             print(f"  claim {num:>3}: OK ({len(cleaned)} chars)")
+
+    _repair_dependent_claims(valid)
 
     if verbose and claims_glossary:
         print(
@@ -327,4 +492,5 @@ def translate_claims(state: TranslationState) -> dict:
             f"{details}{artifact_block}"
         )
 
+    _assert_claims_translated(chunks)
     return {"chunks_claims": chunks, "glossary": glossary}
