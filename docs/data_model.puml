@@ -71,8 +71,6 @@ class PreambleSpec {
 class Prompt {
   + str name
   + str system
-  + str user
-  + build_messages()
 }
 
 class LLMClient {

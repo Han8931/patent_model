@@ -24,9 +24,9 @@ def build_graph():
 
     Linear flow (sequential by design — keeps glossary state coherent):
         load → classify → apply_static
+             → chunk_claims → plan_claim_preambles → translate_claims → review_claims
              → chunk_body → translate_body → review_body
              → chunk_abstract → translate_abstract → review_abstract
-             → chunk_claims → plan_claim_preambles → translate_claims → review_claims
              → write
     """
     g = StateGraph(TranslationState)
@@ -58,7 +58,17 @@ def build_graph():
     g.add_edge("load", "classify")
     g.add_edge("classify", "apply_static")
 
-    g.add_edge("apply_static", "chunk_body")
+    g.add_edge("apply_static", "chunk_claims")
+    g.add_edge("chunk_claims", "plan_claim_preambles")
+    g.add_edge("plan_claim_preambles", "translate_claims")
+    g.add_edge("translate_claims", "review_decide_claims")
+    g.add_conditional_edges(
+        "review_decide_claims",
+        needs_revision("claims"),
+        {"revise": "review_revise_claims", "skip": "chunk_body"},
+    )
+    g.add_edge("review_revise_claims", "chunk_body")
+
     g.add_edge("chunk_body", "translate_body")
     g.add_edge("translate_body", "review_decide_body")
     g.add_conditional_edges(
@@ -73,19 +83,9 @@ def build_graph():
     g.add_conditional_edges(
         "review_decide_abstract",
         needs_revision("abstract"),
-        {"revise": "review_revise_abstract", "skip": "chunk_claims"},
+        {"revise": "review_revise_abstract", "skip": "write"},
     )
-    g.add_edge("review_revise_abstract", "chunk_claims")
-
-    g.add_edge("chunk_claims", "plan_claim_preambles")
-    g.add_edge("plan_claim_preambles", "translate_claims")
-    g.add_edge("translate_claims", "review_decide_claims")
-    g.add_conditional_edges(
-        "review_decide_claims",
-        needs_revision("claims"),
-        {"revise": "review_revise_claims", "skip": "write"},
-    )
-    g.add_edge("review_revise_claims", "write")
+    g.add_edge("review_revise_abstract", "write")
 
     g.add_edge("write", END)
 

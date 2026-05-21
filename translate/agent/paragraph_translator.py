@@ -92,6 +92,7 @@ def translate_paragraph_in_place(
     font_name: str,
     build_segment_messages: Callable[[str, dict], list[dict]],
     build_clause_messages: Callable[[str, str, dict], list[dict]],
+    build_glossary_messages: Callable[[str, str, dict], list[dict]] | None = None,
     verbose: bool = False,
 ) -> bool:
     """Translate ONE paragraph and write the English back into its own XML.
@@ -125,9 +126,8 @@ def translate_paragraph_in_place(
     numbered = _number_equation_placeholders(stripped)
 
     if needs_per_segment_translation(numbered):
-        # Inline equations OR inline [NNN] markers — sentence-level path
-        # translates each text segment in isolation and passes markers through
-        # verbatim.
+        # Inline equations — sentence-level path translates each text segment
+        # in isolation and passes equation markers through verbatim.
         en = translate_chunk_by_sentence(
             numbered, client, glossary,
             build_segment_messages=build_segment_messages,
@@ -166,6 +166,20 @@ def translate_paragraph_in_place(
 
     if isinstance(data, dict):
         merge_terms(glossary, data.get("key_terms") or [])
+    if build_glossary_messages is not None:
+        try:
+            raw_terms = client.complete(build_glossary_messages(numbered, en, glossary))
+            terms = extract_json_block(raw_terms)
+            if isinstance(terms, list):
+                merge_terms(glossary, terms)
+            elif isinstance(terms, dict):
+                merge_terms(glossary, terms.get("key_terms") or terms.get("terms") or [])
+        except Exception as exc:
+            if verbose:
+                print(
+                    f"  paragraph_translator: glossary extraction skipped for "
+                    f"record {record.index}: {type(exc).__name__}: {exc}"
+                )
 
     return True
 
@@ -179,6 +193,7 @@ def translate_chunk_per_paragraph(
     font_name: str,
     build_segment_messages: Callable[[str, dict], list[dict]],
     build_clause_messages: Callable[[str, str, dict], list[dict]],
+    build_glossary_messages: Callable[[str, str, dict], list[dict]] | None = None,
     verbose: bool = False,
 ) -> int:
     """Translate every paragraph in ``chunk.paragraph_indices`` independently.
@@ -201,6 +216,7 @@ def translate_chunk_per_paragraph(
             font_name=font_name,
             build_segment_messages=build_segment_messages,
             build_clause_messages=build_clause_messages,
+            build_glossary_messages=build_glossary_messages,
             verbose=verbose,
         )
         if ok:

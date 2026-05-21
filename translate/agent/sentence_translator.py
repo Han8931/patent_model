@@ -36,21 +36,14 @@ from .glossary import clean_translation_text, extract_json_block, merge_terms
 
 
 _EQUATION_TOKEN_RE = re.compile(r"\[EQUATION(?:_\d+)?\]")
-# Paragraph-ID markers like '[0075]'. 1–5 digits; we deliberately match anywhere
-# in the text (not just the start) so a line-broken Word paragraph that contains
-# multiple IDs has each ID surface as its own opaque unit during reassembly.
-_PARAGRAPH_ID_INLINE_RE = re.compile(r"\[\d{1,5}\]")
-# Combined matcher used by split_units — recognizes either marker shape so we
-# can route over them in a single pass without worrying about overlap.
-_OPAQUE_MARKER_RE = re.compile(
-    r"(?P<eq>\[EQUATION(?:_\d+)?\])|(?P<pid>\[\d{1,5}\])"
-)
+_OPAQUE_MARKER_RE = re.compile(r"(?P<eq>\[EQUATION(?:_\d+)?\])|(?P<br>\n)")
 
 # Korean legend headers: '여기서,', '상기 수학식 N에서,', '다만,', …
 _LEGEND_HEADER_RE = re.compile(
     r"(?:여기서|상기\s+[^,，。\n]{1,30}에서|다만)[,，]?\s*",
     re.UNICODE,
 )
+_LEADING_PARAGRAPH_ID_RE = re.compile(r"^(\s*)(\[\d{1,5}\])\s*")
 
 # Boundary at the start of each '<sym>는' / '<sym>은' clause inside a legend.
 # Symbol shape allows any Unicode letter (covers Latin/Greek/math-italic) or
@@ -74,16 +67,16 @@ _CLAUSE_BOUNDARY_RE = re.compile(
 
 @dataclass
 class Unit:
-    kind: str          # "text" or "equation"
+    kind: str          # "text", "equation", or "linebreak"
     payload: str       # text content, or the marker '[EQUATION_N]'
 
 
 def split_units(chunk_text: str) -> list[Unit]:
-    """Split a chunk's Korean text into TEXT / EQUATION / PARA_ID units.
+    """Split a chunk's Korean text into TEXT / EQUATION units.
 
-    Both ``[EQUATION_N]`` (Word-equation placeholder) and ``[NNN]`` (Korean
-    patent paragraph ID — 1–5 digits) become opaque, pass-through units.
-    Everything else (including newlines) becomes a TEXT unit that we translate.
+    ``[EQUATION_N]`` markers and real source line breaks become opaque,
+    pass-through units. Paragraph ID markers such as ``[0075]`` stay in text;
+    their presence alone does not imply a line break or a separate segment.
     """
     units: list[Unit] = []
     last = 0
@@ -93,7 +86,7 @@ def split_units(chunk_text: str) -> list[Unit]:
         if m.group("eq") is not None:
             units.append(Unit("equation", m.group("eq")))
         else:
-            units.append(Unit("para_id", m.group("pid")))
+            units.append(Unit("linebreak", "\n"))
         last = m.end()
     if last < len(chunk_text):
         units.append(Unit("text", chunk_text[last:]))
@@ -158,6 +151,16 @@ def translate_text_segment(
     if not korean.strip():
         return korean
 
+    id_match = _LEADING_PARAGRAPH_ID_RE.match(korean)
+    id_leading = ""
+    id_prefix = ""
+    if id_match:
+        id_leading = id_match.group(1)
+        id_prefix = id_match.group(2)
+        korean = korean[id_match.end():]
+        if not korean.strip():
+            return id_leading + id_prefix
+
     lstripped = korean.lstrip()
     leading_ws = korean[: len(korean) - len(lstripped)]
     rstripped = lstripped.rstrip()
@@ -167,7 +170,10 @@ def translate_text_segment(
     legend = _LEGEND_HEADER_RE.search(body)
     if legend is None:
         en = _llm_text(client, build_segment_messages(body, glossary))
-        return leading_ws + en + trailing_ws
+        translated = leading_ws + en + trailing_ws
+        if id_prefix:
+            return id_leading + id_prefix + " " + translated.lstrip()
+        return translated
 
     pre = body[: legend.start()].strip(" ,，;；。.\n")
     legend_body = body[legend.end():].strip()
@@ -197,7 +203,10 @@ def translate_text_segment(
         combined = f"{pre_en}, {legend_en}"
     else:
         combined = pre_en or legend_en
-    return leading_ws + combined + trailing_ws
+    translated = leading_ws + combined + trailing_ws
+    if id_prefix:
+        return id_leading + id_prefix + " " + translated.lstrip()
+    return translated
 
 
 def translate_chunk_by_sentence(
@@ -210,20 +219,23 @@ def translate_chunk_by_sentence(
 ) -> Optional[str]:
     """Translate a marker-bearing chunk one unit at a time.
 
-    Returns the assembled English (with ``[EQUATION_N]`` and ``[NNN]`` markers
-    preserved in their original positions) on success, or None when no opaque
-    markers are present (so the caller can fall back to the chunk-level path).
+    Returns the assembled English (with ``[EQUATION_N]`` markers and source
+    line breaks preserved in their original positions) on success, or None
+    when no opaque markers are present (so the caller can fall back to the
+    chunk-level path).
     """
     units = split_units(chunk_text)
-    if not any(u.kind in ("equation", "para_id") for u in units):
+    if not any(u.kind in ("equation", "linebreak") for u in units):
         return None
 
     out_parts: list[str] = []
     for unit in units:
-        if unit.kind in ("equation", "para_id"):
+        if unit.kind == "linebreak":
+            out_parts.append("\n")
+        elif unit.kind == "equation":
             # Korean doesn't require whitespace before a math element or
-            # paragraph ID; English does. Insert a space when the previous
-            # part doesn't already end with whitespace.
+            # equation marker; English does. Insert a space when the previous
+            # part does not already end with whitespace.
             if out_parts and not out_parts[-1].endswith((" ", "\t", "\n")):
                 out_parts.append(" ")
             out_parts.append(unit.payload)
@@ -248,20 +260,6 @@ def is_equation_bearing(chunk_text: str) -> bool:
     return bool(_EQUATION_TOKEN_RE.search(chunk_text))
 
 
-def has_inline_paragraph_id(chunk_text: str) -> bool:
-    """True when the chunk text has a '[NNN]' paragraph ID *inside* it.
-
-    Used to detect line-break-induced multi-paragraph chunks: chunk_body
-    already strips a single HEAD '[NNN]' into ``chunk.paragraph_id_prefix``,
-    so any '[NNN]' that survives into the chunk text came from a `<w:br>`
-    in the source — that's the line-breaking case that needs sentence-level
-    splitting so each '[NNN]' stays adjacent to its own body content.
-    """
-    return bool(_PARAGRAPH_ID_INLINE_RE.search(chunk_text))
-
-
 def needs_per_segment_translation(chunk_text: str) -> bool:
-    """Combined router: send through the sentence-level path when the chunk
-    has either inline equations or extra paragraph IDs surviving the head
-    strip."""
-    return is_equation_bearing(chunk_text) or has_inline_paragraph_id(chunk_text)
+    """Route through the sentence-level path for equations or real line breaks."""
+    return is_equation_bearing(chunk_text) or "\n" in chunk_text

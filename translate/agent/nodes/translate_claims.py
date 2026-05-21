@@ -25,11 +25,16 @@ from ..claim_classifier import (
     PreambleSpec,
     build_dependent_preamble,
     extract_preamble,
+    korean_subject_to_english,
     method_dependent_connective,
 )
 from ..docx_utils import postprocess
 from ..glossary import clean_translation_text, extract_json_block, merge_terms
-from ..prompts import build_claim_messages, build_claim_retry_messages
+from ..prompts import (
+    build_claim_glossary_messages,
+    build_claim_messages,
+    build_claim_retry_messages,
+)
 from ..sections import LLM_CLAIM_PREFIX_RE
 from ..state import Chunk, TranslationState
 
@@ -43,6 +48,20 @@ _HANGUL_RE = re.compile(r'[가-힯]')
 _FURTHER_INCLUDE_RE = re.compile(
     r"\bfurther\s+(?:includ(?:ed|ing|es)|contain(?:ed|ing|s))\b",
     re.IGNORECASE,
+)
+_FORBIDDEN_DEPENDENCY_RE = re.compile(
+    r"\b(?:according\s+to|as\s+claimed\s+in|pursuant\s+to|in\s+accordance\s+with)\s+claim\b",
+    re.IGNORECASE,
+)
+_INDEPENDENT_STYLE_RE = re.compile(r"^A[n]?\s+[^:\n]{1,220}\s+comprising\s*:", re.IGNORECASE)
+_METHOD_INDEPENDENT_RE = re.compile(
+    r"^A\s+method(?:\s+of\s+.+?,\s+the\s+method)?\s+comprising\s*:",
+    re.IGNORECASE | re.DOTALL,
+)
+_CRM_INDEPENDENT_RE = re.compile(
+    r"^A\s+non-transitory\s+computer-readable\s+medium\s+storing\s+instructions\s+that,\s+"
+    r"when\s+executed\s+by\s+.+?,\s+cause\s+.+?\s+to\s*:",
+    re.IGNORECASE | re.DOTALL,
 )
 
 
@@ -58,7 +77,8 @@ def _format_translation(claim_num: int, raw_text: str) -> str:
     """Strip LLM-added claim numbers, lowercase after ';'/':', enforce
     'further comprising' for added-element dependent claims, prepend 'N. '."""
     text = LLM_CLAIM_PREFIX_RE.sub('', raw_text.strip())
-    text = re.sub(r'(?<=[;:])\n([A-Z])', _lower_claim_element_initial, text)
+    text = _break_claim_colons(text)
+    text = re.sub(r'(?<=[;:])\n(\t*)([A-Z])', _lower_claim_element_initial, text)
     text = _enforce_further_comprising(text)
     return f"{claim_num}. {text}"
 
@@ -72,17 +92,24 @@ def _lower_claim_element_initial(m: re.Match) -> str:
     all-caps symbols when they are followed by a definition verb.
     """
     text = m.string
-    pos = m.end(1)
+    indent = m.group(1)
+    initial = m.group(2)
+    pos = m.end(2)
     tail = text[pos:]
     if pos < len(text) and re.match(r'[A-Z0-9_₀-₉]', text[pos]):
-        return "\n" + m.group(1)
+        return "\n" + indent + initial
     if re.match(
         r'\s+(?:is|are|denotes?|represents?|stands?\s+for|indicates?|means?)\b',
         tail,
         flags=re.IGNORECASE,
     ):
-        return "\n" + m.group(1)
-    return "\n" + m.group(1).lower()
+        return "\n" + indent + initial
+    return "\n" + indent + initial.lower()
+
+
+def _break_claim_colons(text: str) -> str:
+    """USPTO claim style: claim element lists begin on the line after ':'."""
+    return re.sub(r':\s+(?=[A-Za-z])', ':\n\t', text)
 
 
 def _enforce_independent_preamble(text: str, planned: str | None) -> str:
@@ -98,10 +125,40 @@ def _enforce_independent_preamble(text: str, planned: str | None) -> str:
     planned = planned.strip()
     if not text or text.startswith(planned):
         return text
+    if planned.endswith(":") and text.lower().startswith(planned[:-1].lower()):
+        return planned + text[len(planned) - 1:]
     match = re.match(r'^[A-Z][^:\n]{0,220}:', text)
     if not match:
         return text
     return planned + text[match.end():]
+
+
+def _fallback_independent_preamble(chunk: Chunk) -> str | None:
+    """Deterministic preamble if the LLM preamble planner returns nothing."""
+    kind = chunk.claim_kind or "device"
+    if kind == "method":
+        return "A method comprising:"
+    if kind == "crm":
+        chunk.noun_phrase = chunk.noun_phrase or "non-transitory computer-readable medium"
+        chunk.actor_phrase = chunk.actor_phrase or "processor"
+        return (
+            "A non-transitory computer-readable medium storing instructions that, "
+            "when executed by a processor, cause the processor to:"
+        )
+    if kind == "system":
+        chunk.noun_phrase = chunk.noun_phrase or "system"
+        return "A system comprising:"
+    noun = chunk.noun_phrase or korean_subject_to_english(chunk.text) or "device"
+    if noun.lower() == "apparatus":
+        noun = "device"
+    chunk.noun_phrase = noun
+    return f"A {noun} comprising:"
+
+
+def _ensure_independent_preamble(chunk: Chunk) -> None:
+    if chunk.independent_preamble:
+        return
+    chunk.independent_preamble = _fallback_independent_preamble(chunk)
 
 
 def _dependent_opening(
@@ -158,6 +215,70 @@ def _enforce_dependent_preamble(text: str, required: str | None) -> str:
     return required + " " + text
 
 
+def _claim_style_problem(
+    chunk: Chunk,
+    text: str,
+    required_dependent_opening: str | None,
+) -> str:
+    """Return a concrete USPTO-style problem, or '' when the claim is acceptable."""
+    body = text.strip()
+    if _FORBIDDEN_DEPENDENCY_RE.search(body):
+        return "The claim uses a forbidden dependency phrase such as 'according to claim'."
+    if "apparatus" in body[:180].lower() and (chunk.claim_kind or "device") == "device":
+        return "The device claim preamble uses 'apparatus' instead of the specific claim subject."
+    if chunk.is_independent:
+        planned = (chunk.independent_preamble or "").strip()
+        if planned and not body.lower().startswith(planned.lower()):
+            return f"The independent claim must begin exactly with: {planned}"
+        kind = chunk.claim_kind or "device"
+        if kind == "method" and not _METHOD_INDEPENDENT_RE.match(body):
+            return "The independent method claim must start with 'A method comprising:' or 'A method of ..., the method comprising:'."
+        if kind == "crm" and not _CRM_INDEPENDENT_RE.match(body):
+            return "The CRM claim must use the standard non-transitory computer-readable medium preamble."
+        if kind in {"device", "system"} and not _INDEPENDENT_STYLE_RE.match(body):
+            return "The independent device/system claim must start with 'A <noun phrase> comprising:'."
+        return ""
+
+    if required_dependent_opening:
+        required = required_dependent_opening.strip()
+        if not body.lower().startswith(required.lower()):
+            return f"The dependent claim must begin exactly with: {required}"
+        if body[len(required):].startswith(":"):
+            return "The dependent claim has an invalid colon immediately after its dependency preamble."
+        return ""
+
+    if re.match(r"^A[n]?\s+", body, re.IGNORECASE):
+        return "The dependent claim was rendered as an independent claim."
+    return ""
+
+
+def _extract_claim_terms(
+    *,
+    client,
+    korean_claim: str,
+    english_claim: str,
+    glossary: dict[str, str],
+    verbose: bool,
+    claim_num: int | None,
+) -> None:
+    """Best-effort glossary extraction from a completed claim translation."""
+    try:
+        raw = client.complete(
+            build_claim_glossary_messages(korean_claim, english_claim, glossary)
+        )
+        terms = extract_json_block(raw)
+        if isinstance(terms, list):
+            merge_terms(glossary, terms)
+        elif isinstance(terms, dict):
+            merge_terms(glossary, terms.get("key_terms") or terms.get("terms") or [])
+    except Exception as exc:
+        if verbose:
+            print(
+                f"  translate_claims claim {claim_num}: "
+                f"glossary extraction skipped ({type(exc).__name__}: {exc})"
+            )
+
+
 def _translate_one(
     chunk: Chunk,
     *,
@@ -165,8 +286,11 @@ def _translate_one(
     glossary: dict[str, str],
     parent_spec: PreambleSpec | None,
     verbose: bool,
-) -> dict | None:
-    """Run one LLM call for ``chunk``. Mutates chunk.translation; returns key_terms."""
+) -> bool:
+    """Run one LLM call for ``chunk``. Mutates chunk.translation."""
+    if chunk.is_independent:
+        _ensure_independent_preamble(chunk)
+
     method_connective = "wherein"
     if chunk.claim_kind == "method" and not chunk.is_independent:
         method_connective = method_dependent_connective(chunk.text)
@@ -207,12 +331,32 @@ def _translate_one(
                     text = _enforce_dependent_preamble(
                         text, required_dependent_opening
                     )
-                formatted = _format_translation(chunk.claim_num, postprocess(text))
+                text = postprocess(text)
+                style_problem = _claim_style_problem(
+                    chunk, text, required_dependent_opening
+                )
+                if style_problem:
+                    last_problem = style_problem
+                    if attempt == 1:
+                        text = _repair_claim_style(
+                            chunk, text, required_dependent_opening
+                        )
+                        style_problem = _claim_style_problem(
+                            chunk, text, required_dependent_opening
+                        )
+                        if style_problem:
+                            last_problem = style_problem
+                            raise ValueError(style_problem)
+                    else:
+                        raise ValueError(style_problem)
+                formatted = _format_translation(chunk.claim_num, text)
                 if _contains_hangul(formatted):
                     last_problem = "The formatted claim still contains Korean/Hangul text."
                 else:
                     chunk.translation = formatted
-                    return data
+                    return True
+        except ValueError as exc:
+            last_problem = str(exc)
         except Exception as exc:
             last_problem = f"The model call failed: {type(exc).__name__}: {exc}"
 
@@ -228,7 +372,18 @@ def _translate_one(
             )
 
     chunk.translation = ""
-    return None
+    return False
+
+
+def _repair_claim_style(
+    chunk: Chunk,
+    text: str,
+    required_dependent_opening: str | None,
+) -> str:
+    """Last-chance deterministic repair for otherwise translated claim text."""
+    if chunk.is_independent:
+        return _enforce_independent_preamble(text, chunk.independent_preamble)
+    return _enforce_dependent_preamble(text, required_dependent_opening)
 
 
 def _assert_claims_translated(chunks: list[Chunk]) -> None:
@@ -270,12 +425,19 @@ def translate_claims(state: TranslationState) -> dict:
         key=lambda c: c.claim_num,
     )
     for chunk in independents:
-        data = _translate_one(
+        translated = _translate_one(
             chunk, client=client, glossary=glossary,
             parent_spec=None, verbose=verbose,
         )
-        if data is not None:
-            merge_terms(glossary, data.get("key_terms") or [])
+        if translated and chunk.translation:
+            _extract_claim_terms(
+                client=client,
+                korean_claim=chunk.text,
+                english_claim=chunk.translation,
+                glossary=glossary,
+                verbose=verbose,
+                claim_num=chunk.claim_num,
+            )
 
         if chunk.translation:
             # Strip the leading "N." (plus whatever whitespace postprocess
@@ -319,12 +481,19 @@ def translate_claims(state: TranslationState) -> dict:
                 f"no preamble for parents={chunk.parent_claim_nums}; falling back"
             )
 
-        data = _translate_one(
+        translated = _translate_one(
             chunk, client=client, glossary=glossary,
             parent_spec=parent_spec, verbose=verbose,
         )
-        if data is not None:
-            merge_terms(glossary, data.get("key_terms") or [])
+        if translated and chunk.translation:
+            _extract_claim_terms(
+                client=client,
+                korean_claim=chunk.text,
+                english_claim=chunk.translation,
+                glossary=glossary,
+                verbose=verbose,
+                claim_num=chunk.claim_num,
+            )
 
         if parent_spec is not None:
             chunk.noun_phrase = parent_spec.noun_phrase

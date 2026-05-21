@@ -32,7 +32,7 @@ download.py       — Download .docx files from S3 to a local directory
 preprocess.py     — Strip paragraph numbering ([0016]) from raw docx files
 translate/
   client.py       — OpenAI-compatible LLM client (works with Ollama, OpenAI, etc.)
-  prompt.py       — Section-specific prompts + review-phase prompts
+  agent/prompts.py — Section-specific prompts + agent prompt builders
   translator.py   — Core translation engine
   s3.py           — S3 file listing and download helpers
 data/             — Input documents (git-ignored)

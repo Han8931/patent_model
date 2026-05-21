@@ -144,15 +144,13 @@ def _append_translatable_text(
 ) -> None:
     """Append paragraph text while treating each top-level equation as atomic.
 
-    ``state`` carries 'in_field' across the recursion. When a w:fldChar with
-    type='begin' is encountered, in_field flips to True and stays True (so we
-    skip both the field's instruction text AND the cached display value)
-    until the matching w:fldChar with type='end'. Without this, SEQ fields
-    used for auto-numbering ('[0001]') leak their display value into the
-    chunk text and the LLM sees pseudo-IDs glued to real content.
+    ``state`` carries a field stack across recursion. Field instruction text
+    is never visible text. Field display text is visible and should be
+    translated for fields such as HYPERLINK/REF, but SEQ-style auto-numbering
+    fields are skipped so generated paragraph numbers do not leak into chunks.
     """
     if state is None:
-        state = {"in_field": 0}
+        state = {"fields": []}
 
     if _is_math_element(el):
         math_text = _element_text(el)
@@ -175,28 +173,54 @@ def _append_translatable_text(
         # whole run as one [EQUATION] marker so the LLM keeps a placeholder
         # in the right relative position and the writer can reinsert text
         # around the run.
-        if state["in_field"] == 0:
+        if not _skip_current_field_display(state):
             parts.append(_EQUATION_PLACEHOLDER)
         return
 
     local = _local_name(el)
+    if local == 'simpleField':
+        instr = el.get(qn('w:instr')) or ''
+        if _field_instruction_skips_display(instr):
+            return
+        for child in el:
+            _append_translatable_text(
+                child, parts, state,
+                math_as_placeholder=math_as_placeholder,
+            )
+        return
     if local == 'fldChar':
         # w:fldChar attribute is in the WordprocessingML namespace.
         ftype = el.get(qn('w:fldCharType'))
         if ftype == 'begin':
-            state["in_field"] += 1
-        elif ftype == 'end' and state["in_field"] > 0:
-            state["in_field"] -= 1
+            state["fields"].append({"instr": "", "phase": "instr", "skip": False})
+        elif ftype == 'separate' and state["fields"]:
+            field = state["fields"][-1]
+            field["phase"] = "display"
+            field["skip"] = _field_instruction_skips_display(field["instr"])
+        elif ftype == 'end' and state["fields"]:
+            state["fields"].pop()
         return
     if local == 'instrText':
         # Field instruction text — never visible content.
+        if state["fields"]:
+            state["fields"][-1]["instr"] += el.text or ''
         return
     if local == 't':
-        if el.text and state["in_field"] == 0:
+        if el.text and not _skip_current_field_display(state):
             parts.append(el.text)
         return
-    if local == 'br':
+    if local in ('br', 'cr'):
         parts.append('\n')
+        return
+    if local == 'tab':
+        parts.append('\t')
+        return
+    if local == 'noBreakHyphen':
+        parts.append('-')
+        return
+    if local == 'softHyphen':
+        return
+    if local in ('delText',):
         return
 
     for child in el:
@@ -204,6 +228,23 @@ def _append_translatable_text(
             child, parts, state,
             math_as_placeholder=math_as_placeholder,
         )
+
+
+def _field_instruction_skips_display(instr: str) -> bool:
+    """True for generated field displays that should not become source text."""
+    head = (instr or "").strip().split(maxsplit=1)
+    if not head:
+        return False
+    return head[0].upper() in {"SEQ", "PAGE", "NUMPAGES"}
+
+
+def _skip_current_field_display(state: dict) -> bool:
+    for field in state.get("fields", []):
+        if field.get("phase") == "instr":
+            return True
+        if field.get("skip"):
+            return True
+    return False
 
 
 def _top_level_math_elements(para) -> list:
@@ -830,8 +871,36 @@ def _repair_malformed_semicolon_legend(text: str) -> str:
     return _MALFORMED_SEMICOLON_LEGEND_RE.sub(repl, text)
 
 
+_FIGS_REF_RE = re.compile(
+    r'\b(?:figures|figs)\.?\s+(\d+[A-Za-z]?(?:\s*(?:,|and|to|-)\s*\d+[A-Za-z]?)+)',
+    re.IGNORECASE,
+)
+_FIG_REF_RE = re.compile(r'\b(?:figure|fig)\.?\s+(\d+[A-Za-z]?)', re.IGNORECASE)
+_BARE_FIG_RE = re.compile(r'\bFIG\s+(\d+[A-Za-z]?)\b')
+
+
+def _normalize_figure_refs(text: str) -> str:
+    """Normalize figure references to USPTO-style FIG./FIGS."""
+
+    def plural_repl(m: re.Match) -> str:
+        refs = re.sub(
+            r'\d+[A-Za-z]?',
+            lambda ref: ref.group(0).upper(),
+            m.group(1),
+        )
+        return f"FIGS. {refs}"
+
+    def singular_repl(m: re.Match) -> str:
+        return f"FIG. {m.group(1).upper()}"
+
+    text = _FIGS_REF_RE.sub(plural_repl, text)
+    text = _FIG_REF_RE.sub(singular_repl, text)
+    return _BARE_FIG_RE.sub(singular_repl, text)
+
+
 def postprocess(text: str) -> str:
     text = _normalize_unicode(text)
+    text = _normalize_figure_refs(text)
     text = _expand_respectively(text)
     text = _repair_malformed_semicolon_legend(text)
     text = _break_sentences(text)

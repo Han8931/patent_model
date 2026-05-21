@@ -1,19 +1,14 @@
-"""Reproduce the '[0074][0075] body...' line-break merge bug.
+"""Verify Word line breaks containing paragraph IDs survive translation.
 
 Builds a docx where ONE Word paragraph contains BOTH '[0074]' and '[0075]'
-separated by a <w:br/>. Before the sentence-level routing fix, the LLM
-received the whole blob in one call and frequently emitted
+separated by a real <w:br/>. The important part is the Word line break, not
+the paragraph-ID token itself: paragraph IDs are preserved as text, and the
+source <w:br/> remains a line break in the translated paragraph.
 
-    [0074][0075] body content joined together
-
-instead of the correct
+Expected output shape:
 
     [0074] body 1
     [0075] body 2
-
-With the marker-aware sentence-level path, the [0075] is treated as an
-opaque unit, the two text fragments around it go through separate focused
-LLM calls, and the line break is preserved in the assembly.
 
 Run:
     uv run python scripts/test_linebreak_paragraph_ids.py
@@ -125,7 +120,7 @@ def main() -> None:
     doc = Document(dst)
     for i, p in enumerate(doc.paragraphs):
         text = (p.text or "").strip()
-        # Count [NNN] markers — should be one per output line.
+        # Count [NNN] markers — this sample has one per source line.
         import re
         ids = re.findall(r"\[\d{1,5}\]", text)
         print(f"[{i:>2}] ids={ids}  {text!r}")

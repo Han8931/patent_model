@@ -8,6 +8,7 @@ import time
 from ..docx_utils import postprocess
 from ..glossary import clean_translation_text, extract_json_block, merge_terms
 from ..prompts import (
+    build_body_glossary_messages,
     build_body_messages,
     build_body_retry_messages,
     build_clause_messages,
@@ -50,6 +51,33 @@ def _apply_paragraph_id_prefix(chunk: Chunk, text: str) -> str:
     ):
         translated = f"{chunk.paragraph_id_prefix} {translated.lstrip()}"
     return translated
+
+
+def _extract_body_terms(
+    *,
+    client,
+    korean_text: str,
+    english_text: str,
+    glossary: dict[str, str],
+    verbose: bool,
+    chunk_id: str,
+) -> None:
+    """Best-effort glossary update from translated description text."""
+    try:
+        raw = client.complete(
+            build_body_glossary_messages(korean_text, english_text, glossary)
+        )
+        terms = extract_json_block(raw)
+        if isinstance(terms, list):
+            merge_terms(glossary, terms)
+        elif isinstance(terms, dict):
+            merge_terms(glossary, terms.get("key_terms") or terms.get("terms") or [])
+    except Exception as exc:
+        if verbose:
+            print(
+                f"  translate_body chunk {chunk_id}: glossary extraction skipped "
+                f"({type(exc).__name__}: {exc})"
+            )
 
 
 def translate_body(state: TranslationState) -> dict:
@@ -95,6 +123,7 @@ def translate_body(state: TranslationState) -> dict:
                     font_name=font,
                     build_segment_messages=build_segment_messages,
                     build_clause_messages=build_clause_messages,
+                    build_glossary_messages=build_body_glossary_messages,
                     verbose=verbose,
                 )
             except Exception as exc:
@@ -116,9 +145,9 @@ def translate_body(state: TranslationState) -> dict:
                 time.sleep(delay)
             continue
 
-        # Chunks containing opaque markers ([EQUATION_N] or inline [NNN]
-        # paragraph IDs from <w:br> line breaks) take the sentence-level path:
-        # one LLM call per text segment and per per-symbol legend clause. The
+        # Chunks containing equation markers ([EQUATION_N]) take the
+        # sentence-level path: one LLM call per text segment and per
+        # per-symbol legend clause. The
         # markers never go through a single combined translation, so they
         # can't drift out of position or get glued together at the start.
         # Pure-prose chunks keep the cheaper single call.
@@ -140,6 +169,14 @@ def translate_body(state: TranslationState) -> dict:
                     )
             if en:
                 chunk.translation = _apply_paragraph_id_prefix(chunk, en)
+                _extract_body_terms(
+                    client=client,
+                    korean_text=chunk.text,
+                    english_text=chunk.translation,
+                    glossary=glossary,
+                    verbose=verbose,
+                    chunk_id=chunk.id,
+                )
             else:
                 chunk.translation = ""
             if not chunk.translation:
@@ -169,6 +206,14 @@ def translate_body(state: TranslationState) -> dict:
                     else:
                         chunk.translation = translated
                         merge_terms(glossary, data.get("key_terms") or [])
+                        _extract_body_terms(
+                            client=client,
+                            korean_text=chunk.text,
+                            english_text=chunk.translation,
+                            glossary=glossary,
+                            verbose=verbose,
+                            chunk_id=chunk.id,
+                        )
                         break
             except Exception as exc:
                 last_problem = f"The model call failed: {type(exc).__name__}: {exc}"
