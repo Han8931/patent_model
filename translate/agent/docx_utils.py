@@ -983,6 +983,15 @@ _REF_CHAR_BODY = r'(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{1,12}'
 _SPACED_REF_BRACKET_RE = re.compile(
     rf'(?<=\w)(?<![A-Z0-9_])\s*[\(\[](?P<ref>{_REF_CHAR_BODY})[\)\]]'
 )
+# Compact sub-index notation common in Korean drafts (``GR(1)``, ``NF2(2)``).
+# In USPTO style these become concatenated reference characters (``GR1``,
+# ``NF22``). The lookbehind requires an uppercase letter or digit IMMEDIATELY
+# before the bracket — no whitespace — so abbreviations like ``compound (EMC)``
+# (handled by the spaced regex) and math notation like ``〖BIT〗_(3k+1)``
+# (content has ``+``) are not affected.
+_COMPACT_REF_BRACKET_RE = re.compile(
+    rf'(?<=[A-Z0-9])[\(\[](?P<ref>{_REF_CHAR_BODY})[\)\]]'
+)
 _LEADING_PARAGRAPH_ID_RE = re.compile(r'^\s*\[\d{1,5}\]')
 
 
@@ -1008,10 +1017,19 @@ def _normalize_figure_refs(text: str) -> str:
 def _normalize_reference_brackets(text: str) -> str:
     """Remove brackets around reference characters while preserving symbols.
 
-    Korean patent drafts often write reference numerals as ``구성(100)``. In
-    USPTO-style English this should be ``component 100``. Preserve paragraph
-    IDs like ``[0001]`` and compact symbolic forms such as ``GR(1)`` by only
-    removing brackets that follow a word character and by restoring a space.
+    Two forms get normalized:
+    - SPACED: ``구성(100)`` / ``structure (WF2)`` → ``component 100`` /
+      ``structure WF2``.
+    - COMPACT (Korean sub-index notation): ``GR(1)`` → ``GR1``, ``NF2(1)`` →
+      ``NF21``. The bracket must directly follow an uppercase letter or digit.
+
+    Preserved:
+    - Paragraph IDs at the start of a paragraph, e.g. ``[0001]``.
+    - ``[EQUATION_N]`` markers (explicit guard on the inner text).
+    - Abbreviations with no digit such as ``(MD)``, ``(EMC)`` — they fail the
+      digit-required guard inside ``_REF_CHAR_BODY``.
+    - Math notation containing operators or non-ASCII subscript brackets, e.g.
+      ``〖BIT〗_(3k+1)`` — ``+`` is outside the ref-char alphabet.
     """
     leading_id = ""
     rest = text
@@ -1019,13 +1037,21 @@ def _normalize_reference_brackets(text: str) -> str:
     if m:
         leading_id = m.group(0)
         rest = text[m.end():]
-    def repl(m: re.Match) -> str:
+
+    def spaced_repl(m: re.Match) -> str:
         ref = m.group('ref')
         if ref.upper().startswith("EQUATION"):
             return m.group(0)
         return f" {ref}"
 
-    rest = _SPACED_REF_BRACKET_RE.sub(repl, rest)
+    def compact_repl(m: re.Match) -> str:
+        ref = m.group('ref')
+        if ref.upper().startswith("EQUATION"):
+            return m.group(0)
+        return ref
+
+    rest = _SPACED_REF_BRACKET_RE.sub(spaced_repl, rest)
+    rest = _COMPACT_REF_BRACKET_RE.sub(compact_repl, rest)
     return leading_id + rest
 
 

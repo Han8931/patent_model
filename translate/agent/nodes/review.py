@@ -54,11 +54,13 @@ def _pairs_from(chunks: list[Chunk]) -> list[tuple[str, str]]:
 
 
 _SOURCE_REF_RE = re.compile(r'(?<![A-Za-z0-9_])[\(\[](?P<ref>(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{1,12})[\)\]]')
+# Any bracketed alphanumeric reference (compact ``GR(1)`` or spaced ``(WF1)``).
+# Abbreviations like ``(MD)`` / ``(EMC)`` are excluded by the digit-required
+# inner lookahead. ``[EQUATION_N]`` and FIG. patterns are skipped below.
 _BAD_EN_REF_BRACKET_RE = re.compile(
-    r'(?<![A-Z0-9_])[\(\[](?P<ref>(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{1,12})[\)\]]',
-    re.IGNORECASE,
+    r'[\(\[](?P<ref>(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{1,12})[\)\]]'
 )
-_PARAGRAPH_ID_RE = re.compile(r'^\s*\[\d{1,5}\]')
+_PARAGRAPH_ID_RE = re.compile(r'(?m)^\s*\[\d{1,5}\]')
 _EQUATION_RE = re.compile(r'\[EQUATION(?:_\d+)?\]')
 
 
@@ -79,10 +81,17 @@ def _bad_english_reference_brackets(text: str) -> list[str]:
         ref = m.group("ref")
         if ref.upper().startswith("EQUATION"):
             continue
-        prefix = cleaned[max(0, m.start() - 8):m.start()].upper()
-        if re.search(r'\bFIGS?\.?\s*$', prefix):
+        prefix_window = cleaned[max(0, m.start() - 8):m.start()]
+        if re.search(r'\bFIGS?\.?\s*$', prefix_window.upper()):
             continue
-        bad.append(ref)
+        # For compact forms ``GR(1)``, attach the immediately preceding
+        # uppercase/digit prefix so the report names the full pattern instead
+        # of just the inner digits.
+        attached = re.search(r'[A-Za-z][A-Za-z0-9_-]*$', prefix_window)
+        token = m.group(0)
+        if attached:
+            token = attached.group(0) + token
+        bad.append(token)
     return bad
 
 
