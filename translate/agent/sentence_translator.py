@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from .glossary import clean_translation_text, extract_json_block, merge_terms
+from .validation import translation_problem
 
 
 _EQUATION_TOKEN_RE = re.compile(r"\[EQUATION(?:_\d+)?\]")
@@ -120,15 +121,48 @@ def split_into_clauses(text: str) -> list[tuple[str, str]]:
 
 def _llm_text(client, messages: list[dict]) -> str:
     """Run one LLM call and return cleaned plain text, or '' on failure."""
-    try:
-        raw = client.complete(messages)
-    except Exception:
-        return ""
-    data = extract_json_block(raw) or {}
-    text = clean_translation_text(data.get("text"))
-    if text:
-        return text
-    return clean_translation_text(raw)
+    active = list(messages)
+    last_problem = ""
+    for attempt in range(4):
+        try:
+            raw = client.complete(active)
+        except Exception as exc:
+            last_problem = f"The model call failed: {type(exc).__name__}: {exc}"
+        else:
+            data = extract_json_block(raw) or {}
+            text = clean_translation_text(data.get("text")) or clean_translation_text(raw)
+            problem = translation_problem(text)
+            if not problem:
+                return text
+            last_problem = problem
+
+        if attempt < 2:
+            active = active + [{
+                "role": "user",
+                "content": (
+                    "The previous response was invalid. "
+                    f"Problem: {last_problem}\n"
+                    "Return only the English translation fragment. "
+                    "Do not use JSON, markdown, notes, or Korean text."
+                ),
+            }]
+        elif attempt == 2:
+            korean = active[-1].get("content", "")
+            active = [
+                {
+                    "role": "system",
+                    "content": "Translate Korean patent text into USPTO-style English. Output plain English only.",
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Translate this Korean patent text fragment. "
+                        "Do not output JSON, markdown, notes, or Korean text.\n\n"
+                        f"{korean}"
+                    ),
+                },
+            ]
+    return ""
 
 
 def translate_text_segment(

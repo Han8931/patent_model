@@ -12,6 +12,7 @@ from ..prompts import (
     build_body_messages,
     build_body_retry_messages,
     build_clause_messages,
+    build_simple_body_messages,
     build_segment_messages,
 )
 from ..paragraph_translator import (
@@ -23,6 +24,7 @@ from ..sentence_translator import (
     translate_chunk_by_sentence,
 )
 from ..state import Chunk, TranslationState
+from ..validation import translation_problem
 
 
 _HANGUL_RE = re.compile(r'[가-힯]')
@@ -193,16 +195,18 @@ def translate_body(state: TranslationState) -> dict:
             equation_context=chunk.equation_context,
         )
         last_problem = ""
-        for attempt in range(2):
+        for attempt in range(4):
             try:
                 raw = client.complete(messages)
                 text, data = _extract_body_text(raw)
-                if not text:
-                    last_problem = "The response did not contain usable English text."
+                problem = translation_problem(text)
+                if problem:
+                    last_problem = problem
                 else:
                     translated = _apply_paragraph_id_prefix(chunk, text)
-                    if _contains_hangul(translated):
-                        last_problem = "The response still contains Korean/Hangul text."
+                    problem = translation_problem(translated)
+                    if problem:
+                        last_problem = problem
                     else:
                         chunk.translation = translated
                         merge_terms(glossary, data.get("key_terms") or [])
@@ -220,14 +224,16 @@ def translate_body(state: TranslationState) -> dict:
 
             if verbose:
                 prefix = f"  translate_body chunk {chunk.id}: "
-                suffix = " Retrying..." if attempt == 0 else ""
+                suffix = " Retrying..." if attempt < 3 else ""
                 print(f"{prefix}{last_problem}{suffix}")
-            if attempt == 0:
+            if attempt < 2:
                 messages = build_body_retry_messages(
                     previous_messages=messages,
                     problem=last_problem,
                     chunk_text=chunk.text,
                 )
+            elif attempt == 2:
+                messages = build_simple_body_messages(chunk.text, glossary)
         else:
             chunk.translation = ""
 

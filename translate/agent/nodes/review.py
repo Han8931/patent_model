@@ -22,6 +22,7 @@ from ..nodes.translate_claims import (
 )
 from ..prompts import build_decision_messages, build_revision_messages
 from ..state import Chunk, TranslationState
+from ..validation import translation_problem
 
 
 SectionKind = Literal["body", "abstract", "claims"]
@@ -102,15 +103,31 @@ def make_decide(kind: SectionKind) -> Callable[[TranslationState], dict]:
         verbose = state.get("verbose", False)
 
         progress(f"Reviewing {_section_label(kind)}…")
-        try:
-            raw = client.complete(build_decision_messages(_section_label(kind), pairs, glossary))
-            decision = extract_json_block(raw) or {}
-            if not isinstance(decision, dict):
-                decision = {"needs_revision": False, "issues": []}
-        except Exception as exc:
+        messages = build_decision_messages(_section_label(kind), pairs, glossary)
+        decision = {"needs_revision": False, "issues": []}
+        last_problem = ""
+        for attempt in range(4):
+            try:
+                raw = client.complete(messages)
+                parsed = extract_json_block(raw)
+                if isinstance(parsed, dict):
+                    decision = parsed
+                    break
+                last_problem = "The review decision was not valid JSON object."
+            except Exception as exc:
+                last_problem = f"The review call failed: {type(exc).__name__}: {exc}"
             if verbose:
-                print(f"  review_decide_{kind} failed: {exc}")
-            decision = {"needs_revision": False, "issues": []}
+                suffix = " Retrying..." if attempt < 3 else ""
+                print(f"  review_decide_{kind}: {last_problem}{suffix}")
+            if attempt < 2:
+                messages = messages + [{
+                    "role": "user",
+                    "content": (
+                        "Return only valid JSON in this exact shape: "
+                        '{"needs_revision": false, "issues": []} or '
+                        '{"needs_revision": true, "issues": ["issue"]}.'
+                    ),
+                }]
 
         if verbose:
             if decision.get("needs_revision"):
@@ -141,19 +158,35 @@ def make_revise(kind: SectionKind) -> Callable[[TranslationState], dict]:
         verbose = state.get("verbose", False)
 
         progress(f"Revising {_section_label(kind)}…")
-        try:
-            raw = client.complete(build_revision_messages(
+        messages = build_revision_messages(
                 _section_label(kind), pairs,
                 decision.get("issues") or [],
                 glossary,
-            ))
-            revisions = extract_json_block(raw)
-            if not isinstance(revisions, list):
-                revisions = []
-        except Exception as exc:
+            )
+        revisions = []
+        last_problem = ""
+        for attempt in range(4):
+            try:
+                raw = client.complete(messages)
+                parsed = extract_json_block(raw)
+                if isinstance(parsed, list):
+                    revisions = parsed
+                    break
+                last_problem = "The revision response was not a valid JSON array."
+            except Exception as exc:
+                last_problem = f"The revision call failed: {type(exc).__name__}: {exc}"
             if verbose:
-                print(f"  review_revise_{kind} failed: {exc}")
-            return {}
+                suffix = " Retrying..." if attempt < 3 else ""
+                print(f"  review_revise_{kind}: {last_problem}{suffix}")
+            if attempt < 2:
+                messages = messages + [{
+                    "role": "user",
+                    "content": (
+                        "Return only a valid JSON array like "
+                        '[{"index": 0, "text": "revised English text"}]. '
+                        "Use [] if no paragraph needs revision."
+                    ),
+                }]
 
         # The pairs index corresponds to chunks-with-a-translation; map back to chunks.
         translated_chunks = [c for c in chunks if c.translation]
@@ -182,6 +215,13 @@ def make_revise(kind: SectionKind) -> Callable[[TranslationState], dict]:
                         continue
                 else:
                     text = postprocess(text)
+                    problem = translation_problem(text)
+                    if problem:
+                        if verbose:
+                            print(
+                                f"  [REVIEW {kind}] Skipped revision {idx}: {problem}"
+                            )
+                        continue
                 translated_chunks[idx].translation = text
                 applied += 1
 

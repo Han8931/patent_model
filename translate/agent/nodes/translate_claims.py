@@ -34,9 +34,11 @@ from ..prompts import (
     build_claim_glossary_messages,
     build_claim_messages,
     build_claim_retry_messages,
+    build_simple_claim_messages,
 )
 from ..sections import LLM_CLAIM_PREFIX_RE
 from ..state import Chunk, TranslationState
+from ..validation import translation_problem
 
 
 _HANGUL_RE = re.compile(r'[가-힯]')
@@ -313,15 +315,14 @@ def _translate_one(
     )
 
     last_problem = ""
-    for attempt in range(2):
+    for attempt in range(4):
         try:
             raw = client.complete(messages)
             data = extract_json_block(raw) or {}
             text = clean_translation_text(data.get("text")) or clean_translation_text(raw)
-            if not text:
-                last_problem = "The response did not contain usable English text."
-            elif _contains_hangul(text):
-                last_problem = "The response still contains Korean/Hangul text."
+            problem = translation_problem(text)
+            if problem:
+                last_problem = problem
             else:
                 if chunk.is_independent:
                     text = _enforce_independent_preamble(
@@ -332,12 +333,16 @@ def _translate_one(
                         text, required_dependent_opening
                     )
                 text = postprocess(text)
+                problem = translation_problem(text)
+                if problem:
+                    last_problem = problem
+                    raise ValueError(problem)
                 style_problem = _claim_style_problem(
                     chunk, text, required_dependent_opening
                 )
                 if style_problem:
                     last_problem = style_problem
-                    if attempt == 1:
+                    if attempt == 3:
                         text = _repair_claim_style(
                             chunk, text, required_dependent_opening
                         )
@@ -362,13 +367,21 @@ def _translate_one(
 
         if verbose:
             prefix = f"  translate_claims claim {chunk.claim_num}: "
-            suffix = " Retrying..." if attempt == 0 else ""
+            suffix = " Retrying..." if attempt < 3 else ""
             print(f"{prefix}{last_problem}{suffix}")
-        if attempt == 0:
+        if attempt < 2:
             messages = build_claim_retry_messages(
                 previous_messages=messages,
                 problem=last_problem,
                 chunk_text=chunk.text,
+            )
+        elif attempt == 2:
+            messages = build_simple_claim_messages(
+                claim_num=chunk.claim_num,
+                chunk_text=chunk.text,
+                glossary=glossary,
+                required_opening=required_dependent_opening,
+                independent_preamble=chunk.independent_preamble,
             )
 
     chunk.translation = ""

@@ -60,6 +60,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--font", default="Times New Roman", help="Output font name (default: Times New Roman)"
     )
+    parser.add_argument(
+        "--font-size",
+        type=float,
+        default=12,
+        help="Output font size in points (default: 12)",
+    )
     parser.add_argument("--no-review", action="store_true", help="Skip the post-translation review pass")
     parser.add_argument("--quiet", action="store_true", help="Suppress progress output")
     parser.add_argument(
@@ -104,6 +110,7 @@ def main() -> None:
             args.input,
             output,
             font=args.font,
+            font_size=args.font_size,
             delay=args.delay,
             verbose=not args.quiet,
             review=not args.no_review,

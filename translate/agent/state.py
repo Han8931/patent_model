@@ -71,6 +71,7 @@ class TranslationState(TypedDict, total=False):
     input_path: Path
     output_path: Path
     font: str
+    font_size: int | float
     review: bool
     verbose: bool
     delay: float

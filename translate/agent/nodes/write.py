@@ -18,6 +18,7 @@ from ..docx_utils import (
     has_non_text_content,
     iter_all_paragraphs,
     insert_para_after,
+    normalize_document_font,
     normalize_symbol,
     remove_paragraph,
     replace_text,
@@ -609,6 +610,7 @@ def write(state: TranslationState) -> dict:
     doc = state["doc"]
     records = state["records"]
     font = state["font"]
+    font_size = state.get("font_size", 12)
     output_path = state["output_path"]
     progress = state.get("progress") or (lambda _: None)
     verbose = state.get("verbose", False)
@@ -622,20 +624,31 @@ def write(state: TranslationState) -> dict:
 
     # Apply body, abstract, claims chunks. Per-chunk isolation so one bad
     # paragraph doesn't sink the whole document save.
+    body_chunks = state.get("chunks_body", [])
+    abstract_chunks = state.get("chunks_abstract", [])
+    claims_chunks = state.get("chunks_claims", [])
+    total_chunks = len(body_chunks) + len(abstract_chunks) + len(claims_chunks)
     failed = 0
     total = 0
-    for chunk in state.get("chunks_body", []):
+
+    def _write_progress() -> None:
+        if total_chunks and (total % 10 == 0 or total == total_chunks):
+            progress(f"  WRITE {total}/{total_chunks}")
+
+    for chunk in body_chunks:
         total += 1
         success, _ = _safe_apply_chunk(chunk, indexed_records, font, progress, verbose)
         if not success:
             failed += 1
-    for chunk in state.get("chunks_abstract", []):
+        _write_progress()
+    for chunk in abstract_chunks:
         total += 1
         success, _ = _safe_apply_chunk(chunk, indexed_records, font, progress, verbose)
         if not success:
             failed += 1
+        _write_progress()
     previous_claim_last_para = None
-    for chunk in state.get("chunks_claims", []):
+    for chunk in claims_chunks:
         if previous_claim_last_para is not None:
             insert_para_after(previous_claim_last_para, "", font)
             previous_claim_last_para = None
@@ -643,15 +656,16 @@ def write(state: TranslationState) -> dict:
         success, last_para = _safe_apply_chunk(chunk, indexed_records, font, progress, verbose)
         if not success:
             failed += 1
+            _write_progress()
             continue
         previous_claim_last_para = last_para
+        _write_progress()
 
     if total and failed:
         progress(f"WARNING: {failed}/{total} chunks failed to write — those paragraphs remain in Korean.")
 
     # Abstract word count footer — insert after the LAST paragraph of the abstract
     # chunk (so the footer appears after the translated body, not in the middle).
-    abstract_chunks = state.get("chunks_abstract", [])
     if abstract_chunks and abstract_chunks[0].translation:
         try:
             ab = abstract_chunks[0]
@@ -706,6 +720,7 @@ def write(state: TranslationState) -> dict:
             for sig in report["duplicated"][:10]:
                 progress(f"  DUP   sig={sig}")
 
+    normalize_document_font(doc, font, font_size)
     doc.save(output_path)
     elapsed = time.time() - started_at
     minutes, seconds = divmod(int(elapsed), 60)

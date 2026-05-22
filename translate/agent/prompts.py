@@ -98,6 +98,9 @@ _USPTO_SUBMISSION_RULES = (
     "- Use U.S. patent terms consistently: 'comprising', 'configured to',\n"
     "  'disposed on', 'coupled to', 'formed on', 'at least one', 'plurality of',\n"
     "  'wherein', and 'FIG.' where appropriate.\n"
+    "- For inanimate technical relationships, prefer 'of' constructions over\n"
+    "  apostrophe possessives, e.g., 'a surface of the substrate' rather than\n"
+    "  'the substrate's surface', unless an apostrophe form is part of a name.\n"
     "- Avoid prosecution-risk phrasing in claims: no 'invention is', no intended\n"
     "  result standing alone as a limitation, no marketing language, no unsupported\n"
     "  relative terms such as 'excellent', 'improved', or 'high-performance'.\n"
@@ -646,6 +649,29 @@ def build_body_retry_messages(
     return previous_messages + [{"role": "user", "content": retry}]
 
 
+def build_simple_body_messages(chunk_text: str, glossary: dict[str, str]) -> list[dict]:
+    glossary_block = format_for_prompt(glossary)
+    return [
+        {
+            "role": "system",
+            "content": (
+                "Translate Korean patent specification text into filing-ready "
+                "USPTO-style English. Output plain English text only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "Translate this Korean patent specification text into USPTO style.\n"
+                "Rules: preserve reference numerals, symbols, paragraph IDs, FIG. references, "
+                "and [EQUATION_N] markers exactly; do not use markdown or JSON; do not leave Korean.\n"
+                f"Use these claim-derived terms consistently when applicable:\n{glossary_block}\n\n"
+                f"Korean:\n{chunk_text}\n"
+            ),
+        },
+    ]
+
+
 def build_body_glossary_messages(
     korean_text: str,
     english_text: str,
@@ -761,6 +787,28 @@ def build_abstract_messages(chunk_text: str, glossary: dict[str, str]) -> list[d
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
+    ]
+
+
+def build_simple_abstract_messages(chunk_text: str, glossary: dict[str, str]) -> list[dict]:
+    glossary_block = format_for_prompt(glossary)
+    return [
+        {
+            "role": "system",
+            "content": (
+                "Translate Korean patent abstracts into concise USPTO-style English. "
+                "Output plain English text only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "Translate this Korean patent abstract into one concise English paragraph.\n"
+                "Do not output JSON, markdown, notes, or Korean text.\n"
+                f"Use these terms consistently when applicable:\n{glossary_block}\n\n"
+                f"Korean abstract:\n{chunk_text}\n"
+            ),
+        },
     ]
 
 
@@ -978,6 +1026,43 @@ def build_claim_retry_messages(
     return previous_messages + [{"role": "user", "content": retry}]
 
 
+def build_simple_claim_messages(
+    *,
+    claim_num: int,
+    chunk_text: str,
+    glossary: dict[str, str],
+    required_opening: str | None = None,
+    independent_preamble: str | None = None,
+) -> list[dict]:
+    glossary_block = format_for_prompt(glossary)
+    opening = required_opening or independent_preamble
+    opening_rule = (
+        f"\nThe English claim must begin exactly with: {opening}\n"
+        if opening else ""
+    )
+    return [
+        {
+            "role": "system",
+            "content": (
+                "Translate Korean patent claims into strict USPTO claim style. "
+                "Output one plain English claim sentence only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Translate Korean claim {claim_num} into USPTO style.\n"
+                f"{opening_rule}"
+                "Rules: preserve all limitations, dependencies, reference numerals, symbols, "
+                "and [EQUATION_N] markers; use comprising/wherein/further comprising correctly; "
+                "do not output the claim number, JSON, markdown, notes, or Korean text.\n"
+                f"Use these terms consistently when applicable:\n{glossary_block}\n\n"
+                f"Korean claim:\n{chunk_text}\n"
+            ),
+        },
+    ]
+
+
 def build_claim_glossary_messages(
     korean_claim: str,
     english_claim: str,
@@ -1034,8 +1119,10 @@ _REVIEW_SYSTEM = (
     "   100, 100a, GR(1), T1, S10, and Greek/math symbols. They must not be translated,\n"
     "   renumbered, dropped, or used as substitutes for the noun phrase.\n"
     "6. Patent style — formal USPTO language; no contractions; no casual phrasing.\n"
-    "7. Glossary drift — terms in the established glossary must not deviate.\n"
-    "8. Equation layout — [EQUATION] markers, including numbered forms, must remain in\n"
+    "7. Possessives — for inanimate technical component relationships, prefer 'of'\n"
+    "   constructions over apostrophe possessives, unless the apostrophe is part of a name.\n"
+    "8. Glossary drift — terms in the established glossary must not deviate.\n"
+    "9. Equation layout — [EQUATION] markers, including numbered forms, must remain in\n"
     "   the same order and relative position as the Korean source; do not regroup equations\n"
     "   separately from their following descriptions.\n"
     "Respond with valid JSON only.\n"

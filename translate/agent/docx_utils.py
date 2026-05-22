@@ -9,6 +9,7 @@ from copy import deepcopy
 
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.shared import Pt
 from docx.text.paragraph import Paragraph
 
 try:
@@ -25,6 +26,85 @@ _EQUATION_PLACEHOLDER = '[EQUATION]'
 _EQUATION_TOKEN_RE = re.compile(r'\[EQUATION(?:_\d+)?\]')
 _EQUATION_PLACEHOLDER_RE = re.compile(r'\s*\[EQUATION(?:_\d+)?\]\s*')
 _FORMULA_OPERATOR_RE = re.compile(r'[=<>≤≥≈∑∫√]|\b(?:sin|cos|tan|log|ln|exp)\b', re.IGNORECASE)
+_DEFAULT_FONT_SIZE_PT = 12
+
+
+def _get_or_add(parent, child_qname: str):
+    child = parent.find(qn(child_qname))
+    if child is None:
+        child = OxmlElement(child_qname)
+        if child_qname == 'w:rPr' and parent.tag == qn('w:r'):
+            parent.insert(0, child)
+        else:
+            parent.append(child)
+    return child
+
+
+def _apply_rpr_font(rpr, font_name: str, font_size_pt: int | float = _DEFAULT_FONT_SIZE_PT) -> None:
+    r_fonts = _get_or_add(rpr, 'w:rFonts')
+    for attr in ('w:ascii', 'w:hAnsi', 'w:eastAsia', 'w:cs'):
+        r_fonts.set(qn(attr), font_name)
+
+    half_points = str(int(round(float(font_size_pt) * 2)))
+    sz = _get_or_add(rpr, 'w:sz')
+    sz.set(qn('w:val'), half_points)
+    sz_cs = _get_or_add(rpr, 'w:szCs')
+    sz_cs.set(qn('w:val'), half_points)
+
+
+def set_run_font(run, font_name: str, font_size_pt: int | float = _DEFAULT_FONT_SIZE_PT) -> None:
+    """Set all Word font slots and size on a python-docx run."""
+    rpr = _get_or_add(run._r, 'w:rPr')
+    _apply_rpr_font(rpr, font_name, font_size_pt)
+
+
+def _set_xml_run_font(r_el, font_name: str, font_size_pt: int | float) -> None:
+    rpr = _get_or_add(r_el, 'w:rPr')
+    _apply_rpr_font(rpr, font_name, font_size_pt)
+
+
+def _set_xml_paragraph_mark_font(p_el, font_name: str, font_size_pt: int | float) -> None:
+    ppr = _get_or_add(p_el, 'w:pPr')
+    rpr = _get_or_add(ppr, 'w:rPr')
+    _apply_rpr_font(rpr, font_name, font_size_pt)
+
+
+def normalize_document_font(
+    doc,
+    font_name: str = "Times New Roman",
+    font_size_pt: int | float = _DEFAULT_FONT_SIZE_PT,
+) -> None:
+    """Force a consistent font family and size across the generated DOCX.
+
+    Word stores fonts in separate slots for ASCII, East Asian, and complex
+    scripts. Setting only ``run.font.name`` leaves some documents visually
+    inconsistent, especially when the source DOCX had Korean template styles.
+    """
+    for style in doc.styles:
+        font = getattr(style, "font", None)
+        if font is None:
+            continue
+        font.name = font_name
+        font.size = Pt(font_size_pt)
+        rpr = getattr(getattr(style, "element", None), "rPr", None)
+        if rpr is not None:
+            _apply_rpr_font(rpr, font_name, font_size_pt)
+
+    seen: set[int] = set()
+    parts = [doc.part]
+    parts.extend(getattr(doc.part.package, "parts", []))
+    for part in parts:
+        root = getattr(part, 'element', None)
+        if root is None:
+            continue
+        marker = id(root)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        for p_el in root.iter(f'{{{_W}}}p'):
+            _set_xml_paragraph_mark_font(p_el, font_name, font_size_pt)
+        for r_el in root.iter(f'{{{_W}}}r'):
+            _set_xml_run_font(r_el, font_name, font_size_pt)
 
 
 def iter_all_paragraphs(doc):
@@ -455,7 +535,12 @@ def _append_line_to_run(r, part: str) -> None:
     r.append(t)
 
 
-def write_run_with_breaks(run, text: str, font_name: str) -> None:
+def write_run_with_breaks(
+    run,
+    text: str,
+    font_name: str,
+    font_size_pt: int | float = _DEFAULT_FONT_SIZE_PT,
+) -> None:
     """Replace run content; convert \\n into <w:br/> and leading \\t into <w:tab/>."""
     r = run._r
     for child in list(r):
@@ -469,16 +554,17 @@ def write_run_with_breaks(run, text: str, font_name: str) -> None:
         if idx < len(parts) - 1:
             r.append(OxmlElement('w:br'))
 
-    run.font.name = font_name
+    set_run_font(run, font_name, font_size_pt)
 
 
-def _build_text_run(text: str, font_name: str):
+def _build_text_run(
+    text: str,
+    font_name: str,
+    font_size_pt: int | float = _DEFAULT_FONT_SIZE_PT,
+):
     new_r = OxmlElement('w:r')
     new_rpr = OxmlElement('w:rPr')
-    new_rFonts = OxmlElement('w:rFonts')
-    new_rFonts.set(qn('w:ascii'), font_name)
-    new_rFonts.set(qn('w:hAnsi'), font_name)
-    new_rpr.append(new_rFonts)
+    _apply_rpr_font(new_rpr, font_name, font_size_pt)
     new_r.append(new_rpr)
 
     parts = text.split('\n')
@@ -489,7 +575,12 @@ def _build_text_run(text: str, font_name: str):
     return new_r
 
 
-def _replace_text_with_math_placeholders(para, new_text: str, font_name: str) -> bool:
+def _replace_text_with_math_placeholders(
+    para,
+    new_text: str,
+    font_name: str,
+    font_size_pt: int | float = _DEFAULT_FONT_SIZE_PT,
+) -> bool:
     """Replace paragraph text while keeping every inline atom at its source
     XML position.
 
@@ -537,20 +628,25 @@ def _replace_text_with_math_placeholders(para, new_text: str, font_name: str) ->
     for run in para.runs:
         if run._r in atom_runs:
             continue  # don't blank the run that holds the image equation
-        write_run_with_breaks(run, '', font_name)
+        write_run_with_breaks(run, '', font_name, font_size_pt)
 
     for idx, anchor in enumerate(atoms):
         before = parts[idx]
         if before:
-            anchor.addprevious(_build_text_run(before, font_name))
+            anchor.addprevious(_build_text_run(before, font_name, font_size_pt))
 
     after = parts[len(atoms)]
     if after:
-        atoms[-1].addnext(_build_text_run(after, font_name))
+        atoms[-1].addnext(_build_text_run(after, font_name, font_size_pt))
     return True
 
 
-def replace_text(para, new_text: str, font_name: str) -> None:
+def replace_text(
+    para,
+    new_text: str,
+    font_name: str,
+    font_size_pt: int | float = _DEFAULT_FONT_SIZE_PT,
+) -> None:
     """Write new_text into the paragraph's text runs.
 
     Formula-only equations are preserved. Equations containing Korean text are
@@ -558,7 +654,7 @@ def replace_text(para, new_text: str, font_name: str) -> None:
     Korean <m:t> text remains visible because python-docx text runs do not own it.
     """
     _remove_korean_math(para)
-    if _replace_text_with_math_placeholders(para, new_text, font_name):
+    if _replace_text_with_math_placeholders(para, new_text, font_name, font_size_pt):
         return
 
     new_text = _strip_equation_placeholders(new_text)
@@ -566,19 +662,24 @@ def replace_text(para, new_text: str, font_name: str) -> None:
     if not runs:
         if not new_text:
             return
-        _prepend_text_run(para, new_text, font_name)
+        _prepend_text_run(para, new_text, font_name, font_size_pt)
         return
-    write_run_with_breaks(runs[0], new_text, font_name)
+    write_run_with_breaks(runs[0], new_text, font_name, font_size_pt)
     for run in runs[1:]:
         run.text = ''
-        run.font.name = font_name
+        set_run_font(run, font_name, font_size_pt)
     for run in para.runs:
-        run.font.name = font_name
+        set_run_font(run, font_name, font_size_pt)
 
 
-def _prepend_text_run(para, text: str, font_name: str) -> None:
+def _prepend_text_run(
+    para,
+    text: str,
+    font_name: str,
+    font_size_pt: int | float = _DEFAULT_FONT_SIZE_PT,
+) -> None:
     """Insert a new <w:r><w:t>...</w:t></w:r> as the first child of <w:p>."""
-    new_r = _build_text_run(text, font_name)
+    new_r = _build_text_run(text, font_name, font_size_pt)
 
     # Insert after <w:pPr> if present, otherwise at the start
     p = para._p
@@ -595,6 +696,7 @@ def insert_para_after(
     font_name: str,
     *,
     format_ref_para=None,
+    font_size_pt: int | float = _DEFAULT_FONT_SIZE_PT,
 ):
     """Insert a new paragraph immediately after ``ref_para``.
 
@@ -619,7 +721,7 @@ def insert_para_after(
 
     # _build_text_run already handles the \n → <w:br/> split with
     # xml:space="preserve" on lines that have leading/trailing whitespace.
-    new_p.append(_build_text_run(text, font_name))
+    new_p.append(_build_text_run(text, font_name, font_size_pt))
     ref_para._p.addnext(new_p)
     return Paragraph(new_p, ref_para._parent)
 

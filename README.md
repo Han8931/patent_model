@@ -101,6 +101,7 @@ uv run python main.py data/published1_kr_clean.docx \
 | `--context-window` | `3` | Preceding paragraphs passed as rolling context |
 | `--lookahead` | `2` | Upcoming paragraphs included as read-only context |
 | `--font` | `Times New Roman` | Output font |
+| `--font-size` | `12` | Output font size in points |
 | `--delay` | `0.5` | Seconds between API calls |
 | `--no-review` | — | Skip the post-translation review pass |
 | `--quiet` | — | Suppress progress output |
