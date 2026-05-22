@@ -66,6 +66,11 @@ def parse_args() -> argparse.Namespace:
         default=12,
         help="Output font size in points (default: 12)",
     )
+    parser.add_argument(
+        "--suffix",
+        default="_en",
+        help="Suffix for default/directory output names (default: _en)",
+    )
     parser.add_argument("--no-review", action="store_true", help="Skip the post-translation review pass")
     parser.add_argument("--quiet", action="store_true", help="Suppress progress output")
     parser.add_argument(
@@ -77,17 +82,17 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def resolve_output(input_path: Path, output_arg: Path | None) -> Path:
+def resolve_output(input_path: Path, output_arg: Path | None, suffix: str = "_en") -> Path:
     """Resolve the output file path.
 
-    - No argument → output/<input_stem>_en.docx
-    - Directory    → <dir>/<input_stem>_en.docx
+    - No argument → output/<input_stem><suffix>.docx
+    - Directory    → <dir>/<input_stem><suffix>.docx
     - File path    → used as-is
     """
     if output_arg is None or output_arg.is_dir() or not output_arg.suffix:
         directory = output_arg if output_arg is not None else Path("output")
         directory.mkdir(parents=True, exist_ok=True)
-        return directory / f"{input_path.stem}_en.docx"
+        return directory / f"{input_path.stem}{suffix}.docx"
     return output_arg
 
 
@@ -102,7 +107,7 @@ def main() -> None:
         max_tokens=args.max_tokens,
     )
 
-    output = resolve_output(args.input, args.output)
+    output = resolve_output(args.input, args.output, args.suffix)
 
     translator = PatentTranslator(config, batch_size=args.batch_size)
     try:

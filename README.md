@@ -118,6 +118,7 @@ uv run python main.py data/published1_kr_clean.docx \
 | `--max-tokens` | `4096` | Max tokens per response |
 | `--font` | `Times New Roman` | Output font |
 | `--font-size` | `12` | Output font size in points |
+| `--suffix` | `_en` | Suffix for default/directory output names |
 | `--delay` | `0.0` | Seconds between API calls |
 | `--no-review` | — | Skip the post-translation review pass |
 | `--quiet` | — | Suppress progress output |
@@ -184,6 +185,7 @@ Any additional arguments are passed through to `main.py`:
 ./run_data_ts.sh data --model gpt-oss:120b-q8_0 --delay 0.5
 ./run_data_ts.sh data --no-review
 ./run_data_ts.sh --no-review
+./run_data_ts.sh --suffix _v1
 ```
 
 Useful taskspooler commands:
