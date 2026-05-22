@@ -308,6 +308,9 @@ _CLAIMS_BASE_RULES = (
     "- Keep each claim as one sentence.\n"
     "- Preserve claim numbers and dependency references exactly.\n"
     "- Do NOT add or remove limitations.\n"
+    "- Translate ALL content inside Korean parentheses/brackets in the claim.\n"
+    "  Parenthetical/bracketed text may be a qualifier, alternative, signal\n"
+    "  name, reference character, range, or definition; never silently drop it.\n"
     "- Do NOT use reference numerals as substitutes for claim elements. If a\n"
     "  reference numeral is present, keep it after the noun phrase, e.g.,\n"
     "  'a substrate 100', not just '100'.\n"
@@ -1051,6 +1054,7 @@ def build_claim_retry_messages(
         "Translate the Korean claim completely into English now.\n"
         "- Do not leave any Korean/Hangul text in the English claim.\n"
         "- Do not output JSON, schema text, commentary, or markdown.\n"
+        "- Translate every Korean phrase inside parentheses/brackets; do not omit bracketed claim content.\n"
         "- Output ONLY the complete English claim sentence.\n"
         "\n"
         "Korean claim to translate:\n"
@@ -1088,7 +1092,8 @@ def build_simple_claim_messages(
                 f"{opening_rule}"
                 "Rules: preserve all limitations, dependencies, reference numerals, symbols, "
                 "and [EQUATION_N] markers; use comprising/wherein/further comprising correctly; "
-                "do not output the claim number, JSON, markdown, notes, or Korean text.\n"
+                "translate every phrase inside parentheses/brackets; do not output the claim number, "
+                "JSON, markdown, notes, or Korean text.\n"
                 f"Use these terms consistently when applicable:\n{glossary_block}\n\n"
                 f"Korean claim:\n{chunk_text}\n"
             ),
@@ -1142,7 +1147,7 @@ _REVIEW_SYSTEM = (
     "1. Terminology consistency — same Korean term must map to same English term.\n"
     "2. Translation accuracy — no omissions, additions, or hallucinations.\n"
     "   For CLAIMS, compare every Korean limitation, listed element, step,\n"
-    "   dependency phrase, modifier, range, and negative limitation against the\n"
+    "   dependency phrase, bracketed/parenthetical content, modifier, range, and negative limitation against the\n"
     "   English claim. Any omitted limitation is a filing-critical defect.\n"
     "3. Claim structure — independent device/system claims start with 'A <noun phrase> comprising:';\n"
     "   independent method claims start with 'A method comprising:' or 'A method of ..., the method comprising:';\n"
@@ -1234,4 +1239,44 @@ def build_revision_messages(
     return [
         {"role": "system", "content": _REVIEW_SYSTEM},
         {"role": "user", "content": user},
+    ]
+
+
+def build_single_claim_revision_messages(
+    *,
+    korean_claim: str,
+    english_claim: str,
+    issues: list[str],
+    glossary: dict[str, str],
+    required_opening: str | None = None,
+) -> list[dict]:
+    glossary_block = format_for_prompt(glossary)
+    issues_block = "\n".join(f"- {issue}" for issue in issues) or "- Fix all visible claim-quality defects."
+    opening_rule = (
+        f"\nThe revised English claim must begin exactly with: {required_opening}\n"
+        if required_opening else ""
+    )
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You revise Korean-to-English patent claim translations for USPTO filing style. "
+                "Output one plain English claim only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "Revise this English claim using the Korean source.\n"
+                "Preserve every Korean limitation, element, step, dependency, modifier, range, "
+                "condition, bracketed/parenthetical phrase, reference character, and [EQUATION_N] marker. Do not summarize.\n"
+                "Use strict USPTO claim style: comprising, wherein, further comprising, and "
+                "proper dependent preambles. Do not output JSON, markdown, notes, or Korean.\n"
+                f"{opening_rule}"
+                f"Issues to fix:\n{issues_block}\n\n"
+                f"Glossary:\n{glossary_block}\n\n"
+                f"Korean claim:\n{korean_claim}\n\n"
+                f"Current English claim:\n{english_claim}\n"
+            ),
+        },
     ]

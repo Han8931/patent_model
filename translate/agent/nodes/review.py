@@ -17,11 +17,17 @@ from ..docx_utils import postprocess
 from ..glossary import extract_json_block
 from ..nodes.translate_claims import (
     _assert_claims_translated,
+    _claim_style_problem,
     _contains_hangul,
     _dependent_opening,
     _enforce_dependent_preamble,
+    _format_translation,
 )
-from ..prompts import build_decision_messages, build_revision_messages
+from ..prompts import (
+    build_decision_messages,
+    build_revision_messages,
+    build_single_claim_revision_messages,
+)
 from ..state import Chunk, TranslationState
 from ..validation import translation_problem
 
@@ -62,6 +68,32 @@ _BAD_EN_REF_BRACKET_RE = re.compile(
 )
 _PARAGRAPH_ID_RE = re.compile(r'(?m)^\s*\[\d{1,5}\]')
 _EQUATION_RE = re.compile(r'\[EQUATION(?:_\d+)?\]')
+_KOREAN_BRACKET_CONTENT_RE = re.compile(r'[\(\[（［](?P<inner>[^()\[\]（）［］]{1,120}[가-힣][^()\[\]（）［］]{0,120})[\)\]）］]')
+_KOREAN_TOKEN_RE = re.compile(r'[가-힣A-Za-z0-9]+')
+_GENERIC_KOREAN_BRACKET_TOKENS = {
+    "상기", "전술", "이하", "이상", "예", "예를", "예컨대", "선택적",
+    "또는", "및", "중", "적어도", "하나", "복수", "포함", "포함하는",
+}
+_BRACKET_GLOSSARY_FALLBACK: dict[str, tuple[str, ...]] = {
+    "전기": ("electric", "electrical"),
+    "광": ("light", "optical", "optically"),
+    "제어": ("control", "controller", "controlling"),
+    "신호": ("signal",),
+    "전압": ("voltage",),
+    "전류": ("current",),
+    "전극": ("electrode",),
+    "도파로": ("waveguide",),
+    "증폭기": ("amplifier",),
+    "서브": ("sub",),
+    "기판": ("substrate",),
+    "층": ("layer",),
+    "막": ("film", "layer"),
+    "영역": ("region", "area"),
+    "홈": ("groove", "recess"),
+    "깊이": ("depth",),
+    "폭": ("width",),
+    "길이": ("length",),
+}
 
 
 def _source_reference_chars(text: str) -> set[str]:
@@ -99,6 +131,39 @@ def _english_has_ref(text: str, ref: str) -> bool:
     return re.search(rf'(?<![A-Za-z0-9_-]){re.escape(ref)}(?![A-Za-z0-9_-])', text) is not None
 
 
+def _source_bracketed_claim_tokens(text: str) -> list[tuple[str, list[str]]]:
+    items: list[tuple[str, list[str]]] = []
+    for m in _KOREAN_BRACKET_CONTENT_RE.finditer(text):
+        inner = m.group("inner").strip()
+        tokens: list[str] = []
+        for token in _KOREAN_TOKEN_RE.findall(inner):
+            if token in _GENERIC_KOREAN_BRACKET_TOKENS:
+                continue
+            if token.isdigit():
+                tokens.append(token)
+                continue
+            if re.fullmatch(r'[A-Za-z0-9]+', token):
+                tokens.append(token)
+                continue
+            if len(token) >= 2:
+                tokens.append(token)
+        if tokens:
+            items.append((inner, tokens))
+    return items
+
+
+def _english_covers_bracket_token(token: str, english: str, glossary: dict) -> bool:
+    lowered = english.lower()
+    if re.fullmatch(r'[A-Za-z0-9]+', token):
+        return re.search(rf'(?<![A-Za-z0-9_-]){re.escape(token)}(?![A-Za-z0-9_-])', english, re.IGNORECASE) is not None
+    mapped = glossary.get(token)
+    candidates: list[str] = []
+    if isinstance(mapped, str) and mapped.strip():
+        candidates.append(mapped.strip().lower())
+    candidates.extend(_BRACKET_GLOSSARY_FALLBACK.get(token, ()))
+    return any(candidate and candidate in lowered for candidate in candidates)
+
+
 def _claim_source_item_count(text: str) -> int:
     return (
         text.count(";")
@@ -115,7 +180,12 @@ def _claim_english_item_count(text: str) -> int:
     )
 
 
-def _deterministic_issues(kind: SectionKind, chunks: list[Chunk]) -> list[str]:
+def _deterministic_issues(
+    kind: SectionKind,
+    chunks: list[Chunk],
+    glossary: dict | None = None,
+) -> list[str]:
+    glossary = glossary or {}
     issues: list[str] = []
     for idx, chunk in enumerate(chunks):
         if getattr(chunk, "applied_in_place", False):
@@ -151,6 +221,19 @@ def _deterministic_issues(kind: SectionKind, chunks: list[Chunk]) -> list[str]:
         if kind == "claims":
             if _contains_hangul(english):
                 issues.append(f"{label}: claim translation still contains Korean/Hangul text.")
+            missing_bracket_terms: list[str] = []
+            for inner, tokens in _source_bracketed_claim_tokens(korean):
+                missing = [
+                    token for token in tokens
+                    if not _english_covers_bracket_token(token, english, glossary)
+                ]
+                if missing:
+                    missing_bracket_terms.append(f"{inner} -> {', '.join(missing)}")
+            if missing_bracket_terms:
+                issues.append(
+                    f"{label}: source bracketed/parenthetical claim content appears omitted "
+                    f"({'; '.join(missing_bracket_terms[:5])})."
+                )
             ko_items = _claim_source_item_count(korean)
             en_items = _claim_english_item_count(english)
             if ko_items >= 2 and en_items + 1 < ko_items:
@@ -196,6 +279,129 @@ def _enforce_revised_claim_preamble(
     return _enforce_dependent_preamble(text, required)
 
 
+def _required_claim_opening(
+    chunk: Chunk,
+    specs: dict[int, PreambleSpec],
+) -> str | None:
+    if chunk.is_independent:
+        return chunk.independent_preamble
+    if not chunk.parent_claim_nums:
+        return None
+    parent_spec = None
+    for parent_num in chunk.parent_claim_nums:
+        if parent_num in specs:
+            parent_spec = specs[parent_num]
+            break
+    if parent_spec is None:
+        return None
+    method_connective = "wherein"
+    if chunk.claim_kind == "method":
+        method_connective = method_dependent_connective(chunk.text)
+    return _dependent_opening(chunk, parent_spec, method_connective)
+
+
+def _validate_claim_revision(
+    chunk: Chunk,
+    text: str,
+    specs: dict[int, PreambleSpec],
+) -> tuple[str, str]:
+    if chunk.claim_num is not None:
+        text = re.sub(rf'^\s*{chunk.claim_num}\.\s*', '', text.strip(), count=1)
+    text = _enforce_revised_claim_preamble(chunk, text, specs)
+    text = postprocess(text)
+    problem = translation_problem(text)
+    if problem:
+        return text, problem
+    required = _required_claim_opening(chunk, specs)
+    style_problem = _claim_style_problem(chunk, text, required)
+    if style_problem:
+        return text, style_problem
+    if chunk.claim_num is not None:
+        text = _format_translation(chunk.claim_num, text)
+        problem = translation_problem(text)
+        if problem:
+            return text, problem
+    return text, ""
+
+
+def _claim_nums_from_issues(issues: list[str]) -> set[int]:
+    nums: set[int] = set()
+    for issue in issues:
+        for m in re.finditer(r'\bclaim\s+(\d+)\b', issue, flags=re.IGNORECASE):
+            nums.add(int(m.group(1)))
+    return nums
+
+
+def _issue_list_for_claim(claim_num: int | None, issues: list[str]) -> list[str]:
+    if claim_num is None:
+        return issues
+    needle = re.compile(rf'\bclaim\s+{claim_num}\b', re.IGNORECASE)
+    selected = [issue for issue in issues if needle.search(issue)]
+    return selected or issues
+
+
+def _fallback_revise_claims(
+    *,
+    chunks: list[Chunk],
+    client,
+    glossary: dict,
+    issues: list[str],
+    specs: dict[int, PreambleSpec],
+    verbose: bool,
+) -> int:
+    """Try per-claim repair for claims still flagged after the bulk review."""
+    deterministic = _deterministic_issues("claims", chunks, glossary)
+    flagged_nums = _claim_nums_from_issues(issues + deterministic)
+    if not flagged_nums:
+        return 0
+
+    by_num = {c.claim_num: c for c in chunks if c.claim_num is not None}
+    applied = 0
+    for claim_num in sorted(flagged_nums):
+        chunk = by_num.get(claim_num)
+        if chunk is None:
+            continue
+        required = _required_claim_opening(chunk, specs)
+        messages = build_single_claim_revision_messages(
+            korean_claim=chunk.text,
+            english_claim=chunk.translation or "",
+            issues=_issue_list_for_claim(claim_num, issues + deterministic),
+            glossary=glossary,
+            required_opening=required,
+        )
+        last_problem = ""
+        for attempt in range(4):
+            try:
+                raw = client.complete(messages)
+                text, problem = _validate_claim_revision(
+                    chunk,
+                    raw,
+                    specs,
+                )
+                if not problem:
+                    chunk.translation = text
+                    applied += 1
+                    break
+                last_problem = problem
+            except Exception as exc:
+                last_problem = f"The per-claim revision call failed: {type(exc).__name__}: {exc}"
+            if verbose:
+                suffix = " Retrying..." if attempt < 3 else ""
+                print(
+                    f"  [REVIEW claims] fallback claim {claim_num}: "
+                    f"{last_problem}{suffix}"
+                )
+            if attempt < 3:
+                messages = messages + [{
+                    "role": "user",
+                    "content": (
+                        "Try again. Output only one complete USPTO-style English claim. "
+                        f"Problem to fix: {last_problem}"
+                    ),
+                }]
+    return applied
+
+
 def make_decide(kind: SectionKind) -> Callable[[TranslationState], dict]:
     def decide(state: TranslationState) -> dict:
         if not state.get("review", True):
@@ -203,12 +409,12 @@ def make_decide(kind: SectionKind) -> Callable[[TranslationState], dict]:
 
         chunks = _chunks_for(state, kind)
         pairs = _pairs_from(chunks)
-        deterministic_issues = _deterministic_issues(kind, chunks)
         if not pairs:
             return {f"_review_{kind}_decision": {"needs_revision": False, "issues": []}}
 
         client = state["client"]
         glossary = state.get("glossary", {})
+        deterministic_issues = _deterministic_issues(kind, chunks, glossary)
         progress = state.get("progress") or (lambda _: None)
         verbose = state.get("verbose", False)
 
@@ -271,11 +477,12 @@ def make_revise(kind: SectionKind) -> Callable[[TranslationState], dict]:
         glossary = state.get("glossary", {})
         progress = state.get("progress") or (lambda _: None)
         verbose = state.get("verbose", False)
+        issues = decision.get("issues") if isinstance(decision.get("issues"), list) else []
 
         progress(f"Revising {_section_label(kind)}…")
         messages = build_revision_messages(
                 _section_label(kind), pairs,
-                decision.get("issues") or [],
+                issues,
                 glossary,
             )
         revisions = []
@@ -316,18 +523,17 @@ def make_revise(kind: SectionKind) -> Callable[[TranslationState], dict]:
             text = item.get("text")
             if isinstance(idx, int) and isinstance(text, str) and 0 <= idx < len(translated_chunks):
                 if kind == "claims":
-                    text = _enforce_revised_claim_preamble(
+                    text, problem = _validate_claim_revision(
                         translated_chunks[idx],
                         text,
                         claim_specs,
                     )
-                    text = postprocess(text)
-                    if _contains_hangul(text):
+                    if problem:
                         if verbose:
                             claim_num = translated_chunks[idx].claim_num
                             print(
                                 f"  [REVIEW {kind}] Skipped claim {claim_num} "
-                                "revision containing Korean/Hangul text."
+                                f"revision: {problem}"
                             )
                         continue
                 else:
@@ -343,6 +549,26 @@ def make_revise(kind: SectionKind) -> Callable[[TranslationState], dict]:
                 applied += 1
 
         if kind == "claims":
+            fallback_applied = _fallback_revise_claims(
+                chunks=chunks,
+                client=client,
+                glossary=glossary,
+                issues=issues,
+                specs=claim_specs,
+                verbose=verbose,
+            )
+            applied += fallback_applied
+            remaining = _deterministic_issues("claims", chunks, glossary)
+            if remaining:
+                raise RuntimeError(
+                    "Claim review detected unresolved issue(s) after revision: "
+                    + "; ".join(remaining[:10])
+                )
+            if issues and applied == 0:
+                raise RuntimeError(
+                    "Claim review detected issue(s), but no claim revisions were applied. "
+                    "Refusing to continue with potentially omitted or defective claims."
+                )
             _assert_claims_translated(chunks)
 
         if verbose:
