@@ -979,6 +979,11 @@ _FIGS_REF_RE = re.compile(
 )
 _FIG_REF_RE = re.compile(r'\b(?:figure|fig)\.?\s+(\d+[A-Za-z]?)', re.IGNORECASE)
 _BARE_FIG_RE = re.compile(r'\bFIG\s+(\d+[A-Za-z]?)\b')
+_REF_CHAR_BODY = r'(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{1,12}'
+_SPACED_REF_BRACKET_RE = re.compile(
+    rf'(?<=\w)(?<![A-Z0-9_])\s*[\(\[](?P<ref>{_REF_CHAR_BODY})[\)\]]'
+)
+_LEADING_PARAGRAPH_ID_RE = re.compile(r'^\s*\[\d{1,5}\]')
 
 
 def _normalize_figure_refs(text: str) -> str:
@@ -1000,9 +1005,34 @@ def _normalize_figure_refs(text: str) -> str:
     return _BARE_FIG_RE.sub(singular_repl, text)
 
 
+def _normalize_reference_brackets(text: str) -> str:
+    """Remove brackets around reference characters while preserving symbols.
+
+    Korean patent drafts often write reference numerals as ``구성(100)``. In
+    USPTO-style English this should be ``component 100``. Preserve paragraph
+    IDs like ``[0001]`` and compact symbolic forms such as ``GR(1)`` by only
+    removing brackets that follow a word character and by restoring a space.
+    """
+    leading_id = ""
+    rest = text
+    m = _LEADING_PARAGRAPH_ID_RE.match(text)
+    if m:
+        leading_id = m.group(0)
+        rest = text[m.end():]
+    def repl(m: re.Match) -> str:
+        ref = m.group('ref')
+        if ref.upper().startswith("EQUATION"):
+            return m.group(0)
+        return f" {ref}"
+
+    rest = _SPACED_REF_BRACKET_RE.sub(repl, rest)
+    return leading_id + rest
+
+
 def postprocess(text: str) -> str:
     text = _normalize_unicode(text)
     text = _normalize_figure_refs(text)
+    text = _normalize_reference_brackets(text)
     text = _expand_respectively(text)
     text = _repair_malformed_semicolon_legend(text)
     text = _break_sentences(text)

@@ -1114,6 +1114,9 @@ _REVIEW_SYSTEM = (
     "Assess translated patent text for the following issues:\n"
     "1. Terminology consistency — same Korean term must map to same English term.\n"
     "2. Translation accuracy — no omissions, additions, or hallucinations.\n"
+    "   For CLAIMS, compare every Korean limitation, listed element, step,\n"
+    "   dependency phrase, modifier, range, and negative limitation against the\n"
+    "   English claim. Any omitted limitation is a filing-critical defect.\n"
     "3. Claim structure — independent device/system claims start with 'A <noun phrase> comprising:';\n"
     "   independent method claims start with 'A method comprising:' or 'A method of ..., the method comprising:';\n"
     "   CRM claims use the standard 'A non-transitory computer-readable medium storing instructions...' preamble.\n"
@@ -1124,6 +1127,10 @@ _REVIEW_SYSTEM = (
     "   source must be preserved exactly where legally meaningful, including forms such as\n"
     "   100, 100a, GR(1), T1, S10, and Greek/math symbols. They must not be translated,\n"
     "   renumbered, dropped, or used as substitutes for the noun phrase.\n"
+    "   In descriptions, reference numerals/characters that identify parts must\n"
+    "   NOT remain inside brackets or parentheses: use 'substrate 100' and\n"
+    "   'electrode 100a', not 'substrate (100)', 'substrate [100]', or\n"
+    "   'electrode (100a)'. Preserve true symbolic forms such as GR(1).\n"
     "6. Patent style — formal USPTO language; no contractions; no casual phrasing.\n"
     "7. Possessives — for inanimate technical component relationships, prefer 'of'\n"
     "   constructions over apostrophe possessives, unless the apostrophe is part of a name.\n"
@@ -1149,7 +1156,12 @@ def build_decision_messages(
         f"Section: {section}\n\n"
         f"GLOSSARY (terms that must be used consistently):\n{glossary_block}\n\n"
         f"{paragraphs_block}\n\n"
-        "Identify any quality issues. Respond with JSON only — one of:\n"
+        "Identify any quality issues. For CLAIMS, be strict: flag any omitted\n"
+        "element, step, dependency, modifier, reference character, equation marker,\n"
+        "range, or condition. For BODY/DESCRIPTION, flag bracketed reference\n"
+        "characters such as '(100)' or '[100]' when they identify components and\n"
+        "should be written without brackets in USPTO style.\n"
+        "Respond with JSON only — one of:\n"
         '  {"needs_revision": false, "issues": []}\n'
         '  {"needs_revision": true, "issues": ["<concise description>"]}'
     )
@@ -1178,6 +1190,9 @@ def build_revision_messages(
         f"{paragraphs_block}\n\n"
         "Return ONLY paragraphs that need changes as a JSON array.\n"
         "Omit paragraphs that are already correct.\n"
+        "When revising claims, preserve every source limitation and do not shorten\n"
+        "or summarize. When revising descriptions, remove brackets around component\n"
+        "reference characters while preserving symbolic forms such as GR(1).\n"
         'Format: [{"index": 0, "text": "<revised English text>"}, ...]'
     )
     return [

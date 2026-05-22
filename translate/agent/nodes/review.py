@@ -9,6 +9,7 @@ A conditional edge between them skips the revise step when needs_revision == Fal
 
 from __future__ import annotations
 
+import re
 from typing import Callable, Literal
 
 from ..claim_classifier import PreambleSpec, method_dependent_connective
@@ -48,8 +49,107 @@ def _pairs_from(chunks: list[Chunk]) -> list[tuple[str, str]]:
     return [
         (c.text, c.translation or "")
         for c in chunks
-        if c.translation
+        if not getattr(c, "applied_in_place", False)
     ]
+
+
+_SOURCE_REF_RE = re.compile(r'(?<![A-Za-z0-9_])[\(\[](?P<ref>(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{1,12})[\)\]]')
+_BAD_EN_REF_BRACKET_RE = re.compile(
+    r'(?<![A-Z0-9_])[\(\[](?P<ref>(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{1,12})[\)\]]',
+    re.IGNORECASE,
+)
+_PARAGRAPH_ID_RE = re.compile(r'^\s*\[\d{1,5}\]')
+_EQUATION_RE = re.compile(r'\[EQUATION(?:_\d+)?\]')
+
+
+def _source_reference_chars(text: str) -> set[str]:
+    refs: set[str] = set()
+    for m in _SOURCE_REF_RE.finditer(text):
+        ref = m.group("ref")
+        if ref.isdigit() and len(ref) <= 5 and m.start() == 0:
+            continue
+        refs.add(ref)
+    return refs
+
+
+def _bad_english_reference_brackets(text: str) -> list[str]:
+    cleaned = _PARAGRAPH_ID_RE.sub("", text)
+    bad: list[str] = []
+    for m in _BAD_EN_REF_BRACKET_RE.finditer(cleaned):
+        ref = m.group("ref")
+        if ref.upper().startswith("EQUATION"):
+            continue
+        prefix = cleaned[max(0, m.start() - 8):m.start()].upper()
+        if re.search(r'\bFIGS?\.?\s*$', prefix):
+            continue
+        bad.append(ref)
+    return bad
+
+
+def _english_has_ref(text: str, ref: str) -> bool:
+    return re.search(rf'(?<![A-Za-z0-9_-]){re.escape(ref)}(?![A-Za-z0-9_-])', text) is not None
+
+
+def _claim_source_item_count(text: str) -> int:
+    return (
+        text.count(";")
+        + len(re.findall(r'\s및\s|\s또는\s', text))
+        + len(re.findall(r'단계', text))
+    )
+
+
+def _claim_english_item_count(text: str) -> int:
+    return (
+        text.count(";")
+        + len(re.findall(r'\b(?:and|or)\b', text, flags=re.IGNORECASE))
+        + len(re.findall(r'\n\t', text))
+    )
+
+
+def _deterministic_issues(kind: SectionKind, chunks: list[Chunk]) -> list[str]:
+    issues: list[str] = []
+    for idx, chunk in enumerate(chunks):
+        if getattr(chunk, "applied_in_place", False):
+            continue
+        korean = chunk.text or ""
+        english = chunk.translation or ""
+        label = f"claim {chunk.claim_num}" if kind == "claims" and chunk.claim_num else f"paragraph {idx}"
+
+        if not english.strip():
+            issues.append(f"{label}: English translation is empty or missing.")
+            continue
+
+        bad_refs = _bad_english_reference_brackets(english)
+        if bad_refs:
+            issues.append(
+                f"{label}: reference character(s) still appear in brackets "
+                f"({', '.join(sorted(set(bad_refs)))}) instead of USPTO style without brackets."
+            )
+
+        missing_refs = sorted(
+            ref for ref in _source_reference_chars(korean)
+            if not _english_has_ref(english, ref)
+        )
+        if missing_refs:
+            issues.append(
+                f"{label}: missing source reference character(s) "
+                f"{', '.join(missing_refs)} in the English translation."
+            )
+
+        if _EQUATION_RE.findall(korean) != _EQUATION_RE.findall(english):
+            issues.append(f"{label}: [EQUATION] marker count/order differs from the Korean source.")
+
+        if kind == "claims":
+            if _contains_hangul(english):
+                issues.append(f"{label}: claim translation still contains Korean/Hangul text.")
+            ko_items = _claim_source_item_count(korean)
+            en_items = _claim_english_item_count(english)
+            if ko_items >= 2 and en_items + 1 < ko_items:
+                issues.append(
+                    f"{label}: English claim appears to omit limitations; "
+                    f"source has about {ko_items} listed items/steps but English has about {en_items}."
+                )
+    return issues
 
 
 def _claim_preamble_specs(chunks: list[Chunk]) -> dict[int, PreambleSpec]:
@@ -94,7 +194,8 @@ def make_decide(kind: SectionKind) -> Callable[[TranslationState], dict]:
 
         chunks = _chunks_for(state, kind)
         pairs = _pairs_from(chunks)
-        if len(pairs) < 2:
+        deterministic_issues = _deterministic_issues(kind, chunks)
+        if not pairs:
             return {f"_review_{kind}_decision": {"needs_revision": False, "issues": []}}
 
         client = state["client"]
@@ -129,6 +230,11 @@ def make_decide(kind: SectionKind) -> Callable[[TranslationState], dict]:
                     ),
                 }]
 
+        if deterministic_issues:
+            existing = decision.get("issues") if isinstance(decision.get("issues"), list) else []
+            decision["needs_revision"] = True
+            decision["issues"] = existing + deterministic_issues
+
         if verbose:
             if decision.get("needs_revision"):
                 for issue in decision.get("issues", []):
@@ -149,7 +255,7 @@ def make_revise(kind: SectionKind) -> Callable[[TranslationState], dict]:
 
         chunks = _chunks_for(state, kind)
         pairs = _pairs_from(chunks)
-        if len(pairs) < 2:
+        if not pairs:
             return {}
 
         client = state["client"]
@@ -188,8 +294,10 @@ def make_revise(kind: SectionKind) -> Callable[[TranslationState], dict]:
                     ),
                 }]
 
-        # The pairs index corresponds to chunks-with-a-translation; map back to chunks.
-        translated_chunks = [c for c in chunks if c.translation]
+        # The pairs index corresponds to reviewable chunks.
+        translated_chunks = [
+            c for c in chunks if not getattr(c, "applied_in_place", False)
+        ]
         claim_specs = _claim_preamble_specs(chunks) if kind == "claims" else {}
         applied = 0
         for item in revisions:
