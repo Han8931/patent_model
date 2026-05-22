@@ -29,10 +29,11 @@ cp .env.example .env
 main.py           — Single-file CLI
 batch.py          — Batch translation with multiprocessing + S3 support
 download.py       — Download .docx files from S3 to a local directory
+inspect.py        — Inspect DOCX parsing/chunking before translation
 preprocess.py     — Strip paragraph numbering ([0016]) from raw docx files
 translate/
   client.py       — OpenAI-compatible LLM client (works with Ollama, OpenAI, etc.)
-  agent/prompts.py — Section-specific prompts + agent prompt builders
+  agent/prompts.py — Consolidated prompts for translation, glossary, and review
   translator.py   — Core translation engine
   s3.py           — S3 file listing and download helpers
 data/             — Input documents (git-ignored)
@@ -73,6 +74,23 @@ S3_DOWNLOAD_DIR=data/s3
 
 Already-downloaded files are skipped on re-runs.
 
+## Inspecting DOCX Files
+
+Before translating a new source set, inspect parsing and chunking readiness:
+
+```bash
+# Inspect one document
+uv run python inspect.py data/document.docx
+
+# Inspect every .docx under a directory
+uv run python inspect.py data/
+```
+
+The inspector reports top-level vs recursive paragraph counts, detected sections,
+body/abstract/claim chunks, table-wrapped text, mixed text/image paragraphs, and
+math-bearing paragraphs. This is useful because Word files often store text in
+tables, fields, fragmented runs, and mixed image-equation paragraphs.
+
 ## Single File
 
 ```bash
@@ -98,13 +116,12 @@ uv run python main.py data/published1_kr_clean.docx \
 | `--api-key` | `ollama` | API key |
 | `--temperature` | `0.2` | Sampling temperature |
 | `--max-tokens` | `4096` | Max tokens per response |
-| `--context-window` | `3` | Preceding paragraphs passed as rolling context |
-| `--lookahead` | `2` | Upcoming paragraphs included as read-only context |
 | `--font` | `Times New Roman` | Output font |
 | `--font-size` | `12` | Output font size in points |
-| `--delay` | `0.5` | Seconds between API calls |
+| `--delay` | `0.0` | Seconds between API calls |
 | `--no-review` | — | Skip the post-translation review pass |
 | `--quiet` | — | Suppress progress output |
+| `--log` | `<output>.log` | Translation log path |
 
 ## Batch Mode
 
@@ -134,43 +151,126 @@ Files are downloaded to `S3_DOWNLOAD_DIR` before translation. Already-downloaded
 
 ```python
 WORKERS = 2          # files processed in parallel
-CONTEXT_WINDOW = 3   # rolling backward context (paragraph pairs)
-LOOKAHEAD_WINDOW = 2 # read-only forward context (raw paragraphs)
 REVIEW = True        # post-translation review pass per section
 FONT = "Times New Roman"
-DELAY = 0.5          # seconds between API calls within one file
+DELAY = 0.0          # seconds between API calls within one file
 ```
 
 With a local Ollama model, `WORKERS > 1` does not reduce wall-clock time for a single model. Increase it when using an API provider that supports concurrent requests.
 
-## Translation Pipeline
+## Taskspooler Queue
 
-Each document goes through two passes:
+To enqueue every `.docx` file under `data/` with taskspooler:
 
-### 1. Translation pass
+```bash
+./run_data_ts.sh
+```
 
-Paragraphs are translated one at a time using section-specific prompts:
+The script submits one job per file, equivalent to:
 
-- **Section routing** — body, abstract, and claims each use a dedicated prompt tuned for USPTO style.
-- **Rolling context** — the last `--context-window` translated paragraph pairs are injected as conversation history to maintain terminology consistency.
-- **Lookahead context** — the next `--lookahead` raw paragraphs are appended to each prompt as read-only context, helping with multi-part constructs like enumerated lists and multi-clause claims.
-- **Claim formatting** — `【청구항 N】` markers are replaced with `N.`; the claim body is translated without a number prefix.
-- **Abstract word count** — inserted as `(N)` immediately after the abstract.
-- **Images and equations** — preserved from the source document; only text runs are translated.
-- **Line breaks** — sentences break at `.` and `;` boundaries using `<w:br/>` elements so breaks render correctly in Word.
-- **Unicode normalisation** — non-breaking hyphens, curly quotes, and special spaces are converted to ASCII equivalents to avoid rendering issues in Times New Roman.
+```bash
+ts uv run python main.py data/filename.docx
+```
 
-### 2. Review pass (per section)
+You can pass a different input directory as the first argument:
 
-After each section is fully translated, a two-step review runs:
+```bash
+./run_data_ts.sh data/batch2
+```
 
-1. **Decision node** — sends the full set of Korean/English paragraph pairs to the LLM. Returns `{ "needs_revision": bool, "issues": [...] }`. If no issues are found, the section is kept as-is (no extra API call).
-2. **Revision** — if issues were found, a second call receives the pairs plus the issue list and returns only the paragraphs that need changes. Revisions are applied back to the document in place.
+Any additional arguments are passed through to `main.py`:
 
-The review checks for:
-- Terminology drift (same Korean term translated differently across paragraphs)
-- Translation omissions or hallucinations
-- Claim structure (`A ... comprising:` / `The ... of claim N, wherein`)
-- Figure reference format (`FIG. N`)
+```bash
+./run_data_ts.sh data --model gpt-oss:120b-q8_0 --delay 0.5
+./run_data_ts.sh data --no-review
+./run_data_ts.sh --no-review
+```
 
-Disable with `--no-review` (CLI) or `REVIEW = False` (batch).
+Useful taskspooler commands:
+
+```bash
+ts          # show queued/running/completed jobs
+ts -c 0     # show output for job 0
+ts -S 1     # run one queued job at a time
+```
+
+## Translation Flow
+
+The current pipeline is claim-first so that claim terminology drives the rest of
+the specification:
+
+1. **Load and classify** — recursively reads Word paragraphs, including
+   table-wrapped text, fields, hyperlinks/REF display text, line breaks, tabs,
+   math, and image-based equations.
+2. **Static normalization** — maps Korean section headers to English patent
+   headings and preserves claim headers until the claim writer replaces them.
+3. **Claims first** — chunks claims, plans independent-claim preambles, translates
+   independent claims before dependent claims, and builds a glossary from claim
+   terminology.
+4. **Claim review/fix** — reviews claim consistency, USPTO preambles,
+   dependencies, antecedent basis, reference numerals, figure style, and logical
+   contradictions. If issues are found, the next log line is `Revising CLAIMS…`.
+5. **Description/body** — translates using the claim-derived glossary, then
+   updates the glossary with new description terms where appropriate.
+6. **Body review/fix** — reviews terminology, omissions, artifacts, Korean
+   leftovers, equations, reference numerals, and USPTO style.
+7. **Abstract** — translates after the claim/body terminology is established and
+   inserts the abstract word-count footer.
+8. **Write DOCX** — writes translations back while preserving equations/images,
+   normalizes `FIG.` references, applies Times New Roman/12 pt by default, checks
+   math integrity, and refuses to save if too much Hangul remains.
+
+Progress is printed every 10 items and at completion for long-running stages:
+`PREAMBLE 10/...`, `BODY 10/...`, `CLAIM 10/...`, and `WRITE 10/...`.
+
+## Output Format Rules
+
+Translation outputs are plain English text. The translator does not require JSON
+for translated claims, body, or abstract text. JSON is used only for internal
+structured helper calls such as preamble planning, review decisions, revision
+lists, and glossary extraction.
+
+Key formatting behavior:
+
+- **USPTO style** — claims use `comprising`, `wherein`, `further comprising`,
+  `A <noun phrase> comprising:`, and `The <noun phrase> of claim N, wherein`.
+- **Dependent claims** — dependency preambles are enforced after translation and
+  after review revisions.
+- **Antecedent basis** — prompts require `a/an` for first introduction and `the`
+  for later references; glossary terms are not treated as antecedent basis.
+- **Figure references** — normalized to `FIG. N` or `FIGS. N and M`.
+- **Reference numerals/characters** — preserved as written, including forms such
+  as `100`, `100a`, `GR(1)`, `T1`, and `S10`.
+- **Possessives** — technical component relationships prefer `of` constructions,
+  such as `a surface of the substrate`, over apostrophe possessives.
+- **Line breaks** — actual Word line breaks are preserved; paragraph IDs such as
+  `[0001]` do not by themselves force a new paragraph or line break.
+- **Equations and images** — inline image-equations and OMML equations are kept
+  at their source positions when they appear inside a paragraph.
+- **Fonts** — generated output is normalized to Times New Roman, 12 pt by
+  default, including ASCII, East Asian, and complex-script font slots.
+
+## Review and Retry Logic
+
+Each translation unit can be retried when the model returns unusable output.
+The validator checks for:
+
+- no response or empty output
+- placeholder text
+- refusal/no-input messages
+- markdown tables or fenced code
+- JSON/schema artifacts in translation text
+- remaining Korean/Hangul text
+
+The translator retries up to three more times. On the final retry, it switches
+to a simpler fallback prompt, for example: `Translate this Korean patent
+specification text into USPTO style.`
+
+The review pass is also defensive:
+
+1. **Decision** — reports issues such as terminology drift or claim logic errors.
+2. **Revision** — runs only if issues were detected.
+3. **Validation** — applies only safe revisions. Revisions containing Korean,
+   markdown/JSON artifacts, or invalid claim preambles are skipped.
+
+Disable review with `--no-review` (CLI) or `REVIEW = False` (batch).
