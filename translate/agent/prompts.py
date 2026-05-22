@@ -316,10 +316,10 @@ _CLAIMS_DEVICE_EXTRA = (
     "    '모듈'               → 'module'\n"
     "    '어셈블리'           → 'assembly'\n"
     "    '기판'               → 'substrate'\n"
-    "DO NOT use the generic word 'apparatus'. Use 'device' (or the specific\n"
-    "  noun above) — modern USPTO practice prefers the concrete subject. If the\n"
-    "  Korean source explicitly uses '장치' alone (no qualifier), translate as\n"
-    "  'device', NOT 'apparatus'.\n"
+    "Do not use the generic unqualified word 'apparatus' when the Korean source\n"
+    "  says only '장치'; use 'device' in that case. A qualified technical term\n"
+    "  such as 'LiDAR apparatus' is allowed when the source includes that\n"
+    "  qualifier (e.g., '라이다 장치').\n"
     "ELEMENT GRAMMAR: each element is a NOUN PHRASE introduced with 'a/an',\n"
     "  e.g., 'a first die;', 'a substrate;', 'a gate electrode disposed on the substrate;'.\n"
     "  Do NOT use gerund (-ing) verb forms — those are for method claims only.\n"
@@ -902,6 +902,10 @@ def _independent_user_prompt(
     )
 
 
+def _korean_adds_claim_element(text: str) -> bool:
+    return bool(re.search(r'(?:단계[를을]?\s*)?더\s*포함|[를을]\s*더\s*포함|추가로\s*포함', text))
+
+
 def _dependent_user_prompt(
     claim_num: int,
     kind: ClaimKind,
@@ -928,6 +932,8 @@ def _dependent_user_prompt(
             f"the {parent_spec.actor_phrase or 'processor'} to <bare-infinitive> ...' "
             f"OR '{preamble}, wherein <refining clause> ...'"
         )
+    elif kind in {"device", "system"} and _korean_adds_claim_element(chunk_text):
+        opener = f"'{preamble}, further comprising <new element noun phrase> ...'"
     else:  # device, system
         opener = f"'{preamble}, wherein <limitation> ...'"
 

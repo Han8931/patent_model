@@ -24,6 +24,7 @@ import time
 from ..claim_classifier import (
     PreambleSpec,
     build_dependent_preamble,
+    dependent_adds_element,
     extract_preamble,
     korean_subject_to_english,
     method_dependent_connective,
@@ -64,6 +65,10 @@ _CRM_INDEPENDENT_RE = re.compile(
     r"^A\s+non-transitory\s+computer-readable\s+medium\s+storing\s+instructions\s+that,\s+"
     r"when\s+executed\s+by\s+.+?,\s+cause\s+.+?\s+to\s*:",
     re.IGNORECASE | re.DOTALL,
+)
+_GENERIC_APPARATUS_RE = re.compile(
+    r"^(?:\d+\.\s*)?(?:A|An|The)\s+apparatus\b",
+    re.IGNORECASE,
 )
 
 
@@ -177,6 +182,8 @@ def _dependent_opening(
     )
     if chunk.claim_kind == "method" and method_connective == "further comprising":
         return f"{preamble}, further comprising"
+    if chunk.claim_kind in {"device", "system"} and dependent_adds_element(chunk.text):
+        return f"{preamble}, further comprising"
     return f"{preamble}, wherein"
 
 
@@ -212,9 +219,29 @@ def _enforce_dependent_preamble(text: str, required: str | None) -> str:
 
     dependent = re.match(r'^The\s+[^,\n]{1,220},\s*(?:wherein|further\s+comprising)\b\s*', text, re.IGNORECASE)
     if dependent:
-        return required + " " + text[dependent.end():].lstrip()
+        remainder = text[dependent.end():].lstrip()
+        if required.lower().endswith(", further comprising"):
+            remainder = _strip_redundant_added_element_subject(required, remainder)
+        return required + " " + remainder
 
-    return required + " " + text
+    remainder = text
+    if required.lower().endswith(", further comprising"):
+        remainder = _strip_redundant_added_element_subject(required, remainder)
+    return required + " " + remainder
+
+
+def _strip_redundant_added_element_subject(required: str, remainder: str) -> str:
+    """Repair 'further comprising the device further includes X' -> '... X'."""
+    noun_match = re.match(r'^The\s+(.+?)\s+of\s+claim\b', required, re.IGNORECASE)
+    if not noun_match:
+        return remainder
+    noun = re.escape(noun_match.group(1))
+    pattern = re.compile(
+        rf'^(?:the\s+{noun}\s+)?(?:further\s+)?'
+        r'(?:comprises?|includes?|contains?|including|comprising|containing)\s+',
+        re.IGNORECASE,
+    )
+    return pattern.sub('', remainder, count=1)
 
 
 def _claim_style_problem(
@@ -226,8 +253,8 @@ def _claim_style_problem(
     body = text.strip()
     if _FORBIDDEN_DEPENDENCY_RE.search(body):
         return "The claim uses a forbidden dependency phrase such as 'according to claim'."
-    if "apparatus" in body[:180].lower() and (chunk.claim_kind or "device") == "device":
-        return "The device claim preamble uses 'apparatus' instead of the specific claim subject."
+    if (chunk.claim_kind or "device") == "device" and _GENERIC_APPARATUS_RE.match(body):
+        return "The device claim preamble uses generic 'apparatus' instead of the specific claim subject."
     if chunk.is_independent:
         planned = (chunk.independent_preamble or "").strip()
         if planned and not body.lower().startswith(planned.lower()):

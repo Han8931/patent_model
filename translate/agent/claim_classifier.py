@@ -191,7 +191,7 @@ def detect_kind(text: str, *, default: ClaimKind = "device") -> ClaimKind:
 
 
 # ---------------------------------------------------------------------------
-# Method-dependent connective (wherein vs further comprising)
+# Dependent connective (wherein vs further comprising)
 # ---------------------------------------------------------------------------
 
 _FURTHER_COMPRISING_RE = re.compile(
@@ -199,11 +199,16 @@ _FURTHER_COMPRISING_RE = re.compile(
 )
 
 
+def dependent_adds_element(korean_text: str) -> bool:
+    """True when a dependent claim adds a new element/step."""
+    if _FURTHER_COMPRISING_RE.search(korean_text):
+        return True
+    return False
+
+
 def method_dependent_connective(korean_text: str) -> str:
     """Pick 'further comprising' vs 'wherein' for a method dependent claim."""
-    if _FURTHER_COMPRISING_RE.search(korean_text):
-        return "further comprising"
-    return "wherein"
+    return "further comprising" if dependent_adds_element(korean_text) else "wherein"
 
 
 # ---------------------------------------------------------------------------
