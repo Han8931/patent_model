@@ -7,7 +7,7 @@ import time
 import traceback
 
 
-_HANGUL_RE = re.compile(r"[가-힯]")
+_HANGUL_RE = re.compile(r"[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF\uD7B0-\uD7FF]")
 
 from ..docx_utils import (
     consolidate_formula_math_into,
@@ -606,6 +606,16 @@ def _korean_char_ratio(doc) -> float:
     return hangul / letters if letters else 0.0
 
 
+def _remaining_hangul_paragraphs(doc) -> list[tuple[int, str]]:
+    """Paragraphs that still contain Korean after translation/write."""
+    remaining: list[tuple[int, str]] = []
+    for idx, p in enumerate(iter_all_paragraphs(doc)):
+        text = p.text or ""
+        if _HANGUL_RE.search(text):
+            remaining.append((idx, text.strip().replace("\n", " ")[:120]))
+    return remaining
+
+
 def write(state: TranslationState) -> dict:
     doc = state["doc"]
     records = state["records"]
@@ -684,6 +694,15 @@ def write(state: TranslationState) -> dict:
     # Char-based ratio so static English section headers can't mask a
     # catastrophic translation failure.
     ratio = _korean_char_ratio(doc)
+    remaining_hangul = _remaining_hangul_paragraphs(doc)
+    if remaining_hangul:
+        preview = "; ".join(
+            f"paragraph {idx}: {text!r}" for idx, text in remaining_hangul[:5]
+        )
+        raise RuntimeError(
+            f"Translation still contains Korean/Hangul in {len(remaining_hangul)} paragraph(s). "
+            f"Refusing to save {output_path}. First occurrence(s): {preview}"
+        )
     if ratio > 0.40:
         raise RuntimeError(
             f"Translation appears to have failed: {ratio:.0%} of the document's letters are still Hangul. "

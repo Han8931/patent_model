@@ -27,7 +27,7 @@ from ..state import Chunk, TranslationState
 from ..validation import translation_problem
 
 
-_HANGUL_RE = re.compile(r'[가-힯]')
+_HANGUL_RE = re.compile(r'[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF\uD7B0-\uD7FF]')
 
 
 def _contains_hangul(text: str | None) -> bool:
@@ -127,6 +127,7 @@ def translate_body(state: TranslationState) -> dict:
                     build_clause_messages=build_clause_messages,
                     build_glossary_messages=build_body_glossary_messages,
                     verbose=verbose,
+                    progress=progress,
                 )
             except Exception as exc:
                 if verbose:
@@ -161,6 +162,8 @@ def translate_body(state: TranslationState) -> dict:
                     glossary,
                     build_segment_messages=build_segment_messages,
                     build_clause_messages=build_clause_messages,
+                    progress=progress,
+                    label=f"body chunk {chunk.id}",
                 )
             except Exception as exc:
                 en = None
@@ -171,14 +174,23 @@ def translate_body(state: TranslationState) -> dict:
                     )
             if en:
                 chunk.translation = _apply_paragraph_id_prefix(chunk, en)
-                _extract_body_terms(
-                    client=client,
-                    korean_text=chunk.text,
-                    english_text=chunk.translation,
-                    glossary=glossary,
-                    verbose=verbose,
-                    chunk_id=chunk.id,
-                )
+                problem = translation_problem(chunk.translation)
+                if problem:
+                    if verbose:
+                        print(
+                            f"  translate_body chunk {chunk.id} "
+                            f"(sentence-level): {problem}"
+                        )
+                    chunk.translation = ""
+                else:
+                    _extract_body_terms(
+                        client=client,
+                        korean_text=chunk.text,
+                        english_text=chunk.translation,
+                        glossary=glossary,
+                        verbose=verbose,
+                        chunk_id=chunk.id,
+                    )
             else:
                 chunk.translation = ""
             if not chunk.translation:
@@ -225,7 +237,7 @@ def translate_body(state: TranslationState) -> dict:
             if verbose:
                 prefix = f"  translate_body chunk {chunk.id}: "
                 suffix = " Retrying..." if attempt < 3 else ""
-                print(f"{prefix}{last_problem}{suffix}")
+                progress(f"{prefix}{last_problem}{suffix}")
             if attempt < 2:
                 messages = build_body_retry_messages(
                     previous_messages=messages,
@@ -253,9 +265,9 @@ def translate_body(state: TranslationState) -> dict:
             time.sleep(delay)
 
     if failed:
-        progress(
-            "WARNING: BODY translation unavailable for chunk(s): "
+        raise RuntimeError(
+            "BODY translation failed or still contained Korean after retries for chunk(s): "
             + ", ".join(failed)
-            + ". Those source paragraphs will remain unchanged unless the final Korean-ratio check aborts the file."
+            + ". Refusing to continue with untranslated description text."
         )
     return {"chunks_body": chunks, "glossary": glossary}

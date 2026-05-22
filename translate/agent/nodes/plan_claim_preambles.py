@@ -10,7 +10,7 @@ from ..prompts import build_preamble_plan_messages
 from ..state import Chunk, TranslationState
 
 
-_HANGUL_RE = re.compile(r'[가-힯]')
+_HANGUL_RE = re.compile(r'[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF\uD7B0-\uD7FF]')
 
 
 def _valid_english(value: str) -> bool:

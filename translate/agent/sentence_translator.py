@@ -119,7 +119,13 @@ def split_into_clauses(text: str) -> list[tuple[str, str]]:
 # Per-unit translation
 # ---------------------------------------------------------------------------
 
-def _llm_text(client, messages: list[dict]) -> str:
+def _llm_text(
+    client,
+    messages: list[dict],
+    *,
+    progress=None,
+    label: str = "segment",
+) -> str:
     """Run one LLM call and return cleaned plain text, or '' on failure."""
     active = list(messages)
     last_problem = ""
@@ -136,6 +142,9 @@ def _llm_text(client, messages: list[dict]) -> str:
                 return text
             last_problem = problem
 
+        if progress is not None:
+            suffix = " Retrying..." if attempt < 3 else " Giving up."
+            progress(f"  retry {label}: {last_problem}{suffix}")
         if attempt < 2:
             active = active + [{
                 "role": "user",
@@ -172,6 +181,8 @@ def translate_text_segment(
     *,
     build_segment_messages: Callable[[str, dict], list[dict]],
     build_clause_messages: Callable[[str, str, dict], list[dict]],
+    progress=None,
+    label: str = "segment",
 ) -> str:
     """Translate one inter-equation text segment.
 
@@ -203,7 +214,12 @@ def translate_text_segment(
 
     legend = _LEGEND_HEADER_RE.search(body)
     if legend is None:
-        en = _llm_text(client, build_segment_messages(body, glossary))
+        en = _llm_text(
+            client,
+            build_segment_messages(body, glossary),
+            progress=progress,
+            label=label,
+        )
         translated = leading_ws + en + trailing_ws
         if id_prefix:
             return id_leading + id_prefix + " " + translated.lstrip()
@@ -214,17 +230,29 @@ def translate_text_segment(
 
     pre_en = ""
     if pre:
-        pre_en = _llm_text(client, build_segment_messages(pre, glossary))
+        pre_en = _llm_text(
+            client,
+            build_segment_messages(pre, glossary),
+            progress=progress,
+            label=f"{label} preface",
+        )
 
     clauses = split_into_clauses(legend_body)
     if not clauses:
-        legend_en = _llm_text(client, build_segment_messages(body, glossary))
+        legend_en = _llm_text(
+            client,
+            build_segment_messages(body, glossary),
+            progress=progress,
+            label=f"{label} legend",
+        )
     else:
         translated = []
         for sym, ko_clause in clauses:
             en = _llm_text(
                 client,
                 build_clause_messages(sym, ko_clause, glossary),
+                progress=progress,
+                label=f"{label} clause {sym}",
             )
             if not en:
                 en = f"{sym} is …"
@@ -250,6 +278,8 @@ def translate_chunk_by_sentence(
     *,
     build_segment_messages: Callable[[str, dict], list[dict]],
     build_clause_messages: Callable[[str, str, dict], list[dict]],
+    progress=None,
+    label: str = "chunk",
 ) -> Optional[str]:
     """Translate a marker-bearing chunk one unit at a time.
 
@@ -278,6 +308,8 @@ def translate_chunk_by_sentence(
                 client, unit.payload, glossary,
                 build_segment_messages=build_segment_messages,
                 build_clause_messages=build_clause_messages,
+                progress=progress,
+                label=label,
             )
             if (
                 out_parts

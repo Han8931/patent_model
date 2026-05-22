@@ -42,7 +42,7 @@ from ..state import Chunk, TranslationState
 from ..validation import translation_problem
 
 
-_HANGUL_RE = re.compile(r'[가-힯]')
+_HANGUL_RE = re.compile(r'[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF\uD7B0-\uD7FF]')
 
 # USPTO style: dependent claims that add new elements must use the exact phrase
 # 'further comprising'. The LLM regularly slips into 'further include[d|s|ing]'

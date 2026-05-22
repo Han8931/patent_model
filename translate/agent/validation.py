@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 
-_HANGUL_RE = re.compile(r"[가-힯]")
+_HANGUL_RE = re.compile(r"[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF\uD7B0-\uD7FF]")
 _MARKDOWN_RE = re.compile(
     r"^\s*```|```\s*$|^\s{0,3}#{1,6}\s+|^\s*[-*]\s+|\|.+\|",
     re.MULTILINE,

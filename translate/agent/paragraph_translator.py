@@ -37,6 +37,7 @@ from .sentence_translator import (
     translate_chunk_by_sentence,
     translate_text_segment,
 )
+from .validation import translation_problem
 
 
 # Paragraph-ID prefix detector — same shape as in chunk_body.py. Repeated here
@@ -44,6 +45,7 @@ from .sentence_translator import (
 # that occasionally hides a marker on a w:br-split paragraph).
 _PARAGRAPH_ID_RE = re.compile(r"^[\s ]*\[(\d{1,5})\][\s ]*", re.UNICODE)
 _EQUATION_TOKEN_RE = re.compile(r"\[EQUATION(?:_\d+)?\]")
+_HANGUL_RE = re.compile(r"[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF\uD7B0-\uD7FF]")
 
 
 def _strip_paragraph_id(text: str) -> tuple[str, str | None]:
@@ -84,6 +86,44 @@ def _simple_translate(
     return text, data if isinstance(data, dict) else {}
 
 
+def _rescue_translate_paragraph(
+    client,
+    korean_text: str,
+    glossary: dict,
+    build_segment_messages: Callable[[str, dict], list[dict]],
+    *,
+    progress=None,
+    label: str,
+) -> str:
+    """Last chance whole-paragraph retry when segment assembly leaves Korean."""
+    active = build_segment_messages(korean_text, glossary)
+    last_problem = ""
+    for attempt in range(3):
+        try:
+            raw = client.complete(active)
+            data = extract_json_block(raw) or {}
+            text = clean_translation_text(data.get("text")) or clean_translation_text(raw)
+            text = postprocess(text)
+            problem = translation_problem(text)
+            if not problem:
+                return text
+            last_problem = problem
+        except Exception as exc:
+            last_problem = f"The paragraph rescue call failed: {type(exc).__name__}: {exc}"
+        if progress is not None:
+            suffix = " Retrying..." if attempt < 2 else " Giving up."
+            progress(f"  retry {label} rescue: {last_problem}{suffix}")
+        active = active + [{
+            "role": "user",
+            "content": (
+                "Try again. Translate the full Korean patent description paragraph into "
+                "USPTO-style English. Preserve paragraph IDs, reference characters, "
+                "and [EQUATION_N] markers. Output plain English only; no Korean."
+            ),
+        }]
+    return ""
+
+
 def translate_paragraph_in_place(
     record,
     *,
@@ -94,6 +134,7 @@ def translate_paragraph_in_place(
     build_clause_messages: Callable[[str, str, dict], list[dict]],
     build_glossary_messages: Callable[[str, str, dict], list[dict]] | None = None,
     verbose: bool = False,
+    progress=None,
 ) -> bool:
     """Translate ONE paragraph and write the English back into its own XML.
 
@@ -124,6 +165,8 @@ def translate_paragraph_in_place(
     # Renumber any bare '[EQUATION]' to '[EQUATION_1..N]' so the sentence
     # translator can split on stable, distinct markers.
     numbered = _number_equation_placeholders(stripped)
+    if not _HANGUL_RE.search(numbered):
+        return False
 
     if needs_per_segment_translation(numbered):
         # Inline equations — sentence-level path translates each text segment
@@ -132,6 +175,8 @@ def translate_paragraph_in_place(
             numbered, client, glossary,
             build_segment_messages=build_segment_messages,
             build_clause_messages=build_clause_messages,
+            progress=progress,
+            label=f"paragraph {record.index}",
         )
         data: dict = {}
     else:
@@ -144,6 +189,8 @@ def translate_paragraph_in_place(
             client, numbered, glossary,
             build_segment_messages=build_segment_messages,
             build_clause_messages=build_clause_messages,
+            progress=progress,
+            label=f"paragraph {record.index}",
         )
         data = {}
 
@@ -157,6 +204,28 @@ def translate_paragraph_in_place(
         en = f"{id_prefix} {en.lstrip()}"
 
     en = postprocess(en)
+    problem = translation_problem(en)
+    if problem:
+        rescued = _rescue_translate_paragraph(
+            client,
+            numbered,
+            glossary,
+            build_segment_messages,
+            progress=progress,
+            label=f"paragraph {record.index}",
+        )
+        if rescued:
+            en = rescued
+            if id_prefix and not en.lstrip().startswith(id_prefix):
+                en = f"{id_prefix} {en.lstrip()}"
+            problem = translation_problem(en)
+        if problem:
+            if verbose:
+                print(
+                    f"  paragraph_translator: rejected record {record.index}: "
+                    f"{problem}"
+                )
+            return False
 
     # Apply in-place. For a mixed paragraph (text + inline math),
     # ``replace_text`` routes through ``_replace_text_with_math_placeholders``
@@ -195,6 +264,7 @@ def translate_chunk_per_paragraph(
     build_clause_messages: Callable[[str, str, dict], list[dict]],
     build_glossary_messages: Callable[[str, str, dict], list[dict]] | None = None,
     verbose: bool = False,
+    progress=None,
 ) -> int:
     """Translate every paragraph in ``chunk.paragraph_indices`` independently.
 
@@ -218,6 +288,7 @@ def translate_chunk_per_paragraph(
             build_clause_messages=build_clause_messages,
             build_glossary_messages=build_glossary_messages,
             verbose=verbose,
+            progress=progress,
         )
         if ok:
             applied += 1

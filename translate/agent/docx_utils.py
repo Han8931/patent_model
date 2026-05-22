@@ -21,7 +21,7 @@ except ImportError:  # python-docx pulls lxml, but be defensive.
 _W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 _M = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
 _XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space'
-_HANGUL_RE = re.compile(r'[가-힯]')
+_HANGUL_RE = re.compile(r'[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF\uD7B0-\uD7FF]')
 _EQUATION_PLACEHOLDER = '[EQUATION]'
 _EQUATION_TOKEN_RE = re.compile(r'\[EQUATION(?:_\d+)?\]')
 _EQUATION_PLACEHOLDER_RE = re.compile(r'\s*\[EQUATION(?:_\d+)?\]\s*')
@@ -749,7 +749,7 @@ _FUNC_NAMES = {
 # script (Latin, Greek, math-italic …). We then drop any token that is purely
 # Hangul or otherwise non-math.
 _ALPHA_RUN_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
-_HANGUL_ONLY_RE = re.compile(r"^[가-힯]+$")
+_HANGUL_ONLY_RE = re.compile(r"^[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF\uD7B0-\uD7FF]+$")
 
 
 def normalize_symbol(s: str) -> str:
