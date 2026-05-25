@@ -198,10 +198,18 @@ To enqueue every `.docx` file under `data/` with taskspooler:
 ./run_data_ts.sh
 ```
 
-The script submits one job per file, equivalent to:
+The script first reads and sorts all `.docx` files under the input directory,
+then enqueues one taskspooler job per file. Each job is equivalent to:
 
 ```bash
 ts uv run python main.py data/filename.docx
+```
+
+By default the script sets taskspooler to one slot, so translations run one by
+one:
+
+```bash
+ts -S 1
 ```
 
 You can pass a different input directory as the first argument:
@@ -217,6 +225,12 @@ Any additional arguments are passed through to `main.py`:
 ./run_data_ts.sh data --no-review
 ./run_data_ts.sh --no-review
 ./run_data_ts.sh --suffix _v1
+```
+
+If your model/API can handle concurrent work, override the slot count:
+
+```bash
+TS_SLOTS=2 ./run_data_ts.sh data
 ```
 
 Useful taskspooler commands:
@@ -237,7 +251,10 @@ English Word file.
    Word equations are located so they can be checked later.
 2. **Find paragraphs and sections** — walks through normal paragraphs and
    table-wrapped paragraphs, then labels each part as title, body, claims,
-   abstract, image/equation, blank paragraph, etc.
+   abstract, image/equation, blank paragraph, etc. Obvious headings and claim
+   numbers are detected with rules first, then an LLM fallback classifier checks
+   Korean paragraphs so unusual templates such as `청구항 제1항`, `1. ...`,
+   `기술분야`, or non-standard section headings are less likely to be skipped.
 3. **Normalize headings** — converts Korean patent headings such as
    `[청구범위]` and `[요약서]` to English headings such as `CLAIMS` and
    `ABSTRACT`.

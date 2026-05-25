@@ -29,7 +29,7 @@ _NO_RESPONSE_RE = re.compile(
 
 
 _PAREN_REF_RE = re.compile(
-    r"[\(\[（［](?P<ref>(?:[A-Z]{2,8}|(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{1,16}))[\)\]）］]"
+    r"(?<![A-Za-z0-9_-])[\(\[（［](?P<ref>(?:[A-Z]{2,8}|(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{1,16}))[\)\]）］]"
 )
 _COMPACT_REF_RE = re.compile(
     r"(?P<prefix>[A-Z]{1,6}\d?)[\(（](?P<inner>[0-9][A-Za-z0-9_-]{0,5})[\)）]"

@@ -17,6 +17,13 @@ SECTION_HEADER_MAP = {
     "【요약서】":                        "ABSTRACT",
     "요약서":                            "ABSTRACT",
     "[발명의 효과]":                    "ADVANTAGEOUS EFFECTS OF INVENTION",
+    "[기술분야]":                      "TECHNICAL FIELD",
+    "【기술분야】":                     "TECHNICAL FIELD",
+    "기술분야":                         "TECHNICAL FIELD",
+    "[배경기술]":                      "BACKGROUND ART",
+    "【배경기술】":                     "BACKGROUND ART",
+    "배경기술":                         "BACKGROUND ART",
+    "[발명의 배경이 되는 기술]":        "BACKGROUND ART",
     "[기술적 과제]":                    "TECHNICAL PROBLEM",
     "[과제의 해결 수단]":               "SOLUTION TO PROBLEM",
     "[대표도]":                         "REPRESENTATIVE FIGURE",
@@ -72,9 +79,17 @@ def detect_section_header(stripped: str) -> str | None:
     sig = _hangul_signature(stripped)
     return _HEADER_BY_SIG.get(sig)
 
-# Korean claim header: 【청구항 N】 or [청구항 N] (with optional spaces).
-# No $ — also matches when body text follows on the same paragraph.
-CLAIM_HEADER_RE = re.compile(r'^[【\[]\s*청구항\s*(\d+)\s*[】\]]\s*')
+# Korean claim header variants.  No $ — also matches when body text follows on
+# the same paragraph.  Covers common forms such as:
+#   【청구항 1】, [청구항 제1항], 청구항 1., 청구항 제1항,
+#   제1항., 1., 1)
+CLAIM_HEADER_RE = re.compile(
+    r'^\s*(?:[【\[]\s*)?(?:'
+    r'청구항\s*(?:제\s*)?(\d+)\s*(?:항)?|'
+    r'제\s*(\d+)\s*항|'
+    r'(\d+)\s*[\.)]'
+    r')\s*(?:[】\]]\s*)?(?:[:：.．\)\]]\s*)?'
+)
 
 # Any leading claim-number prefix the LLM might produce.
 LLM_CLAIM_PREFIX_RE = re.compile(r'^(?:CLAIMS?\s+)?(\d+)[.:\s]\s*', re.IGNORECASE)
