@@ -31,6 +31,7 @@ batch.py          — Batch translation with multiprocessing + S3 support
 download.py       — Download .docx files from S3 to a local directory
 inspect.py        — Inspect DOCX parsing/chunking before translation
 preprocess.py     — Strip paragraph numbering ([0016]) from raw docx files
+post_review.py    — Run only post-translation comparison/review on an existing output
 translate/
   client.py       — OpenAI-compatible LLM client (works with Ollama, OpenAI, etc.)
   agent/prompts.py — Consolidated prompts for translation, glossary, and review
@@ -124,6 +125,36 @@ uv run python main.py data/published1_kr_clean.docx \
 | `--quiet` | — | Suppress progress output |
 | `--log` | `<output>.log` | Translation log path |
 
+## Post-Translation Review Only
+
+If you already have a translated DOCX and want to run only the comparison
+review/fix stage without retranslating the whole document:
+
+```bash
+uv run python post_review.py data/source_kr.docx output/source_kr_en.docx
+```
+
+By default this writes `output/source_kr_en_reviewed.docx`. You can choose an
+explicit output path:
+
+```bash
+uv run python post_review.py data/source_kr.docx output/source_kr_en.docx output/final.docx
+```
+
+Audit without saving revisions:
+
+```bash
+uv run python post_review.py data/source_kr.docx output/source_kr_en.docx --audit-only
+```
+
+This standalone reviewer pairs Korean source paragraphs with English output
+paragraphs in order, asks the model to compare them, and updates only paragraphs
+that appear incomplete or inconsistent. It checks for omitted sentences,
+remaining Korean, missing reference numerals/characters including pure-letter
+references such as `(LD)` and `(GC)`, and changed equation markers. If the old
+output was heavily reflowed, paragraph pairing is best-effort; rerunning the full
+translation may be safer.
+
 ## Batch Mode
 
 Edit the configuration block at the top of `batch.py`, then run:
@@ -198,29 +229,46 @@ ts -S 1     # run one queued job at a time
 
 ## Translation Flow
 
-The current pipeline is claim-first so that claim terminology drives the rest of
-the specification:
+In simple words, the translator reads the Korean Word file, translates the parts
+in a patent-aware order, checks for common failures, and only then writes a new
+English Word file.
 
-1. **Load and classify** — recursively reads Word paragraphs, including
-   table-wrapped text, fields, hyperlinks/REF display text, line breaks, tabs,
-   math, and image-based equations.
-2. **Static normalization** — maps Korean section headers to English patent
-   headings and preserves claim headers until the claim writer replaces them.
-3. **Claims first** — chunks claims, plans independent-claim preambles, translates
-   independent claims before dependent claims, and builds a glossary from claim
-   terminology.
-4. **Claim review/fix** — reviews claim consistency, USPTO preambles,
-   dependencies, antecedent basis, reference numerals, figure style, and logical
-   contradictions. If issues are found, the next log line is `Revising CLAIMS…`.
-5. **Description/body** — translates using the claim-derived glossary, then
-   updates the glossary with new description terms where appropriate.
-6. **Body review/fix** — reviews terminology, omissions, artifacts, Korean
-   leftovers, equations, reference numerals, and USPTO style.
-7. **Abstract** — translates after the claim/body terminology is established and
-   inserts the abstract word-count footer.
-8. **Write DOCX** — writes translations back while preserving equations/images,
-   normalizes `FIG.` references, applies Times New Roman/12 pt by default, checks
-   math integrity, and refuses to save if too much Hangul remains.
+1. **Open the DOCX** — reads the Word document in memory. It also records where
+   Word equations are located so they can be checked later.
+2. **Find paragraphs and sections** — walks through normal paragraphs and
+   table-wrapped paragraphs, then labels each part as title, body, claims,
+   abstract, image/equation, blank paragraph, etc.
+3. **Normalize headings** — converts Korean patent headings such as
+   `[청구범위]` and `[요약서]` to English headings such as `CLAIMS` and
+   `ABSTRACT`.
+4. **Translate claims first** — translates independent claims before dependent
+   claims. This lets the claim terminology guide the rest of the specification.
+   The translator also plans USPTO-style claim openings such as
+   `A device comprising:` and `The device of claim 1, wherein ...`.
+5. **Build a glossary** — extracts important Korean → English term pairs from
+   the claims and reuses them in the body and abstract.
+6. **Review/fix claims** — checks claim style, dependencies, preambles,
+   reference characters, figure references, equations, and remaining Korean. If
+   problems are found, the claim text is revised before moving on.
+7. **Translate the description/body** — translates body paragraphs using the
+   claim glossary. Ordinary body text is kept paragraph-by-paragraph to reduce
+   accidental omission. Equation-bearing paragraphs use a special path so Word
+   equations and parameter legends stay in the right place.
+8. **Review/fix body** — checks for missing references, equation marker changes,
+   remaining Korean, malformed output, terminology drift, and other issues.
+9. **Translate the abstract** — translates the abstract after the claim/body
+   terminology is known, then adds the abstract word-count footer.
+10. **Source/translation comparison** — when review is enabled, a final LLM
+    comparison pass checks each Korean chunk against its English translation and
+    revises chunks that appear to omit or mistranslate source content.
+11. **Final coverage check** — before writing, the system checks that important
+    source items such as reference numerals/characters, pure-letter references
+    like `(LD)` and `(GC)`, and equation markers were not dropped. If a chunk
+    fails this check, the output is not saved.
+12. **Write the English DOCX** — writes translated text back into the document,
+    preserves equations/images, normalizes `FIG.` references, applies the output
+    font, verifies equation integrity, and refuses to save if Korean text still
+    remains.
 
 Progress is printed every 10 items and at completion for long-running stages:
 `PREAMBLE 10/...`, `BODY 10/...`, `CLAIM 10/...`, and `WRITE 10/...`.

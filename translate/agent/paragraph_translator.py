@@ -37,7 +37,7 @@ from .sentence_translator import (
     translate_chunk_by_sentence,
     translate_text_segment,
 )
-from .validation import translation_problem
+from .validation import coverage_problem, translation_problem
 
 
 # Paragraph-ID prefix detector — same shape as in chunk_body.py. Repeated here
@@ -204,7 +204,7 @@ def translate_paragraph_in_place(
         en = f"{id_prefix} {en.lstrip()}"
 
     en = postprocess(en)
-    problem = translation_problem(en)
+    problem = translation_problem(en) or coverage_problem(numbered, en)
     if problem:
         rescued = _rescue_translate_paragraph(
             client,
@@ -218,7 +218,7 @@ def translate_paragraph_in_place(
             en = rescued
             if id_prefix and not en.lstrip().startswith(id_prefix):
                 en = f"{id_prefix} {en.lstrip()}"
-            problem = translation_problem(en)
+            problem = translation_problem(en) or coverage_problem(numbered, en)
         if problem:
             if verbose:
                 print(

@@ -39,7 +39,7 @@ from ..prompts import (
 )
 from ..sections import LLM_CLAIM_PREFIX_RE
 from ..state import Chunk, TranslationState
-from ..validation import translation_problem
+from ..validation import coverage_problem, translation_problem
 
 
 _HANGUL_RE = re.compile(r'[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF\uD7B0-\uD7FF]')
@@ -364,6 +364,10 @@ def _translate_one(
                 if problem:
                     last_problem = problem
                     raise ValueError(problem)
+                coverage_issue = coverage_problem(chunk.text, text)
+                if coverage_issue:
+                    last_problem = coverage_issue
+                    raise ValueError(coverage_issue)
                 style_problem = _claim_style_problem(
                     chunk, text, required_dependent_opening
                 )

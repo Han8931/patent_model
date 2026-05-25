@@ -139,7 +139,15 @@ def _can_append_to_body_group(group, nxt) -> bool:
     if nxt.mixed:
         return False
 
-    return _is_continuation(tail.raw)
+    # Do not merge ordinary prose paragraphs merely because the previous
+    # paragraph ends with ':' or ','. Multi-paragraph chunks are written into
+    # the first source paragraph and the trailing source paragraphs are blanked;
+    # if the LLM compresses or omits any trailing paragraph, the omission becomes
+    # silent. Keep ordinary body text paragraph-preserving by default. The only
+    # multi-paragraph body groups retained here are equation + legend layouts,
+    # where grouping is needed to keep standalone equations and their parameter
+    # descriptions together.
+    return False
 
 
 def chunk_body(state: TranslationState) -> dict:

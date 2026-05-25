@@ -8,6 +8,7 @@ from .nodes.chunk_abstract import chunk_abstract
 from .nodes.chunk_body import chunk_body
 from .nodes.chunk_claims import chunk_claims
 from .nodes.classify import classify
+from .nodes.compare import compare_translations
 from .nodes.load import load
 from .nodes.plan_claim_preambles import plan_claim_preambles
 from .nodes.review import make_decide, make_revise, needs_revision
@@ -27,7 +28,7 @@ def build_graph():
              → chunk_claims → plan_claim_preambles → translate_claims → review_claims
              → chunk_body → translate_body → review_body
              → chunk_abstract → translate_abstract → review_abstract
-             → write
+             → compare_translations → write
     """
     g = StateGraph(TranslationState)
 
@@ -51,6 +52,7 @@ def build_graph():
     g.add_node("review_decide_claims", make_decide("claims"))
     g.add_node("review_revise_claims", make_revise("claims"))
 
+    g.add_node("compare_translations", compare_translations)
     g.add_node("write", write)
 
     g.set_entry_point("load")
@@ -83,10 +85,11 @@ def build_graph():
     g.add_conditional_edges(
         "review_decide_abstract",
         needs_revision("abstract"),
-        {"revise": "review_revise_abstract", "skip": "write"},
+        {"revise": "review_revise_abstract", "skip": "compare_translations"},
     )
-    g.add_edge("review_revise_abstract", "write")
+    g.add_edge("review_revise_abstract", "compare_translations")
 
+    g.add_edge("compare_translations", "write")
     g.add_edge("write", END)
 
     return g.compile()

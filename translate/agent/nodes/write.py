@@ -25,6 +25,7 @@ from ..docx_utils import (
     word_count,
 )
 from ..state import Chunk, TranslationState
+from ..validation import coverage_problem
 
 
 _EQUATION_TOKEN_RE = re.compile(r'\[EQUATION(?:_\d+)?\]')
@@ -644,6 +645,21 @@ def write(state: TranslationState) -> dict:
     def _write_progress() -> None:
         if total_chunks and (total % 10 == 0 or total == total_chunks):
             progress(f"  WRITE {total}/{total_chunks}")
+
+    coverage_issues = []
+    for chunk in body_chunks + abstract_chunks + claims_chunks:
+        if getattr(chunk, "applied_in_place", False):
+            continue
+        issue = coverage_problem(chunk.text, chunk.translation)
+        if issue:
+            coverage_issues.append(f"{chunk.id}: {issue}")
+    if coverage_issues:
+        preview = "; ".join(coverage_issues[:10])
+        raise RuntimeError(
+            "Translation coverage check failed before DOCX write. "
+            "Refusing to blank source paragraphs. "
+            f"Issue(s): {preview}"
+        )
 
     for chunk in body_chunks:
         total += 1

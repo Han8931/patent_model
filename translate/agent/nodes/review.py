@@ -29,7 +29,7 @@ from ..prompts import (
     build_single_claim_revision_messages,
 )
 from ..state import Chunk, TranslationState
-from ..validation import translation_problem
+from ..validation import source_reference_tokens, translation_problem
 
 
 SectionKind = Literal["body", "abstract", "claims"]
@@ -59,12 +59,14 @@ def _pairs_from(chunks: list[Chunk]) -> list[tuple[str, str]]:
     ]
 
 
-_SOURCE_REF_RE = re.compile(r'(?<![A-Za-z0-9_])[\(\[](?P<ref>(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{1,12})[\)\]]')
-# Any bracketed alphanumeric reference (compact ``GR(1)`` or spaced ``(WF1)``).
-# Abbreviations like ``(MD)`` / ``(EMC)`` are excluded by the digit-required
-# inner lookahead. ``[EQUATION_N]`` and FIG. patterns are skipped below.
+_SOURCE_REF_RE = re.compile(
+    r'(?<![A-Za-z0-9_])[\(\[](?P<ref>(?:[A-Z]{2,8}|(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{1,12}))[\)\]]'
+)
+# Any bracketed reference character. This includes pure-letter patent reference
+# characters such as (LD) and (GC), which Korean specs often use like numerals.
+# ``[EQUATION_N]`` and FIG. patterns are skipped below.
 _BAD_EN_REF_BRACKET_RE = re.compile(
-    r'[\(\[](?P<ref>(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{1,12})[\)\]]'
+    r'[\(\[](?P<ref>(?:[A-Z]{2,8}|(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{1,12}))[\)\]]'
 )
 _PARAGRAPH_ID_RE = re.compile(r'(?m)^\s*\[\d{1,5}\]')
 _EQUATION_RE = re.compile(r'\[EQUATION(?:_\d+)?\]')
@@ -97,13 +99,9 @@ _BRACKET_GLOSSARY_FALLBACK: dict[str, tuple[str, ...]] = {
 
 
 def _source_reference_chars(text: str) -> set[str]:
-    refs: set[str] = set()
-    for m in _SOURCE_REF_RE.finditer(text):
-        ref = m.group("ref")
-        if ref.isdigit() and len(ref) <= 5 and m.start() == 0:
-            continue
-        refs.add(ref)
-    return refs
+    refs = source_reference_tokens(text)
+    # Do not report paragraph IDs as ordinary missing reference numerals.
+    return {ref for ref in refs if not (ref.isdigit() and len(ref) <= 5)}
 
 
 def _bad_english_reference_brackets(text: str) -> list[str]:

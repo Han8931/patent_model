@@ -24,7 +24,7 @@ from ..sentence_translator import (
     translate_chunk_by_sentence,
 )
 from ..state import Chunk, TranslationState
-from ..validation import translation_problem
+from ..validation import coverage_problem, translation_problem
 
 
 _HANGUL_RE = re.compile(r'[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7AF\uD7B0-\uD7FF]')
@@ -174,7 +174,9 @@ def translate_body(state: TranslationState) -> dict:
                     )
             if en:
                 chunk.translation = _apply_paragraph_id_prefix(chunk, en)
-                problem = translation_problem(chunk.translation)
+                problem = translation_problem(chunk.translation) or coverage_problem(
+                    chunk.text, chunk.translation
+                )
                 if problem:
                     if verbose:
                         print(
@@ -216,7 +218,9 @@ def translate_body(state: TranslationState) -> dict:
                     last_problem = problem
                 else:
                     translated = _apply_paragraph_id_prefix(chunk, text)
-                    problem = translation_problem(translated)
+                    problem = translation_problem(translated) or coverage_problem(
+                        chunk.text, translated
+                    )
                     if problem:
                         last_problem = problem
                     else:

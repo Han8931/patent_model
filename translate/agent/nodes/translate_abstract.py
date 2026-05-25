@@ -6,7 +6,7 @@ from ..docx_utils import postprocess
 from ..glossary import clean_translation_text, extract_json_block, merge_terms
 from ..prompts import build_abstract_messages, build_simple_abstract_messages
 from ..state import TranslationState
-from ..validation import translation_problem
+from ..validation import coverage_problem, translation_problem
 
 
 def translate_abstract(state: TranslationState) -> dict:
@@ -33,7 +33,9 @@ def translate_abstract(state: TranslationState) -> dict:
                 last_problem = problem
             else:
                 translated = postprocess(text)
-                problem = translation_problem(translated)
+                problem = translation_problem(translated) or coverage_problem(
+                    chunk.text, translated
+                )
                 if problem:
                     last_problem = problem
                 else:

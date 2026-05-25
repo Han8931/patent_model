@@ -28,6 +28,76 @@ _NO_RESPONSE_RE = re.compile(
 )
 
 
+_PAREN_REF_RE = re.compile(
+    r"[\(\[（［](?P<ref>(?:[A-Z]{2,8}|(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{1,16}))[\)\]）］]"
+)
+_COMPACT_REF_RE = re.compile(
+    r"(?P<prefix>[A-Z]{1,6}\d?)[\(（](?P<inner>[0-9][A-Za-z0-9_-]{0,5})[\)）]"
+)
+_EQUATION_MARKER_RE = re.compile(r"\[EQUATION(?:_\d+)?\]")
+
+
+def source_reference_tokens(source: str | None) -> set[str]:
+    """Reference tokens that must survive translation.
+
+    Korean patent documents often use both digit-bearing reference numerals
+    (100, 100a, S10, GR(1)) and pure-letter reference characters (LD, GC).
+    The earlier validator only tracked digit-bearing forms, which let pure
+    letter references disappear or remain mishandled.
+    """
+    if not source:
+        return set()
+    refs: set[str] = set()
+    for m in _PAREN_REF_RE.finditer(source):
+        ref = m.group("ref")
+        if ref.upper().startswith("EQUATION"):
+            continue
+        refs.add(ref)
+    for m in _COMPACT_REF_RE.finditer(source):
+        refs.add(m.group("prefix") + m.group("inner"))
+    return refs
+
+
+def _english_has_token(english: str, token: str) -> bool:
+    compact = re.sub(r"[()\[\]（）［］\s]", "", english or "")
+    if token in compact:
+        return True
+    return re.search(
+        rf"(?<![A-Za-z0-9_-]){re.escape(token)}(?![A-Za-z0-9_-])",
+        english or "",
+        re.IGNORECASE,
+    ) is not None
+
+
+def coverage_problem(source: str | None, translation: str | None) -> str:
+    """Return a deterministic source→translation coverage problem, or ''."""
+    if not source or not translation:
+        return ""
+    missing_refs = sorted(
+        ref for ref in source_reference_tokens(source)
+        if not _english_has_token(translation, ref)
+    )
+    if missing_refs:
+        shown = ", ".join(missing_refs[:12])
+        return f"The translation omits source reference numeral/character(s): {shown}."
+
+    src_eq = _EQUATION_MARKER_RE.findall(source)
+    dst_eq = _EQUATION_MARKER_RE.findall(translation)
+    if src_eq != dst_eq:
+        return "The translation does not preserve [EQUATION] marker count/order."
+
+    # Gross omission/summarization guard. English patent translation is rarely
+    # much shorter than Korean source text. Keep this conservative so concise
+    # legitimate translations pass, but obvious paragraph/sentence drops retry
+    # instead of being written over the source paragraph.
+    src_visible = _EQUATION_MARKER_RE.sub("", source)
+    src_len = len(re.sub(r"\s+", "", src_visible))
+    dst_len = len(re.sub(r"\s+", "", translation))
+    if src_len >= 120 and dst_len < int(src_len * 0.45):
+        return "The translation is suspiciously short relative to the source and may omit content."
+    return ""
+
+
 def translation_problem(text: str | None, *, require_no_hangul: bool = True) -> str:
     """Return a concrete output-quality problem, or '' if usable."""
     if text is None:
