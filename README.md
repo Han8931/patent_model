@@ -85,12 +85,18 @@ uv run python inspect.py data/document.docx
 
 # Inspect every .docx under a directory
 uv run python inspect.py data/
+
+# Also use the LLM fallback classifier used by the translation pipeline
+uv run python inspect.py data/document.docx --llm-classify
 ```
 
 The inspector reports top-level vs recursive paragraph counts, detected sections,
 body/abstract/claim chunks, table-wrapped text, mixed text/image paragraphs, and
 math-bearing paragraphs. This is useful because Word files often store text in
-tables, fields, fragmented runs, and mixed image-equation paragraphs.
+tables, fields, fragmented runs, and mixed image-equation paragraphs. Use
+`--llm-classify` when checking difficult templates, because normal translation
+uses the LLM fallback paragraph classifier while the fast default inspection uses
+only deterministic classification.
 
 ## Single File
 

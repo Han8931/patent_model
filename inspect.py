@@ -25,6 +25,7 @@ else:
 
     from docx import Document
 
+    from translate.client import ClientConfig, LLMClient
     from translate.agent.docx_utils import (
         extract_all_text,
         has_drawing,
@@ -50,7 +51,7 @@ def _preview(text: str, limit: int = 96) -> str:
     return text[:limit] + ("..." if len(text) > limit else "")
 
 
-def inspect_docx(path: Path, *, max_rows: int) -> bool:
+def inspect_docx(path: Path, *, max_rows: int, client=None) -> bool:
     print(f"\n== {path} ==")
     try:
         doc = Document(path)
@@ -69,6 +70,8 @@ def inspect_docx(path: Path, *, max_rows: int) -> bool:
         return False
 
     state = {"doc": doc, "font": "Times New Roman", "progress": lambda _: None}
+    if client is not None:
+        state["client"] = client
     try:
         state.update(classify(state))
         state.update(chunk_body(state))
@@ -127,15 +130,35 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Inspect DOCX parsing/chunking readiness.")
     parser.add_argument("path", type=Path, help="A .docx file or a directory containing .docx files")
     parser.add_argument("--max-rows", type=int, default=30, help="Rows to print per document")
+    parser.add_argument(
+        "--llm-classify",
+        action="store_true",
+        help="Use the same LLM fallback paragraph classifier as the translation pipeline",
+    )
+    parser.add_argument("--model", default=None, help="Model for --llm-classify (default: .env/ClientConfig)")
+    parser.add_argument("--base-url", default=None, help="API base URL for --llm-classify")
+    parser.add_argument("--api-key", default=None, help="API key for --llm-classify")
     args = parser.parse_args()
 
     paths = _docx_paths(args.path)
     if not paths:
         raise SystemExit(f"No .docx files found at {args.path}")
 
+    client = None
+    if args.llm_classify:
+        env = ClientConfig.from_env()
+        config = ClientConfig(
+            model=args.model or env.model,
+            base_url=args.base_url or env.base_url,
+            api_key=args.api_key or env.api_key,
+            temperature=env.temperature,
+            max_tokens=env.max_tokens,
+        )
+        client = LLMClient(config)
+
     ok = True
     for path in paths:
-        ok = inspect_docx(path, max_rows=args.max_rows) and ok
+        ok = inspect_docx(path, max_rows=args.max_rows, client=client) and ok
     if not ok:
         raise SystemExit(1)
 
